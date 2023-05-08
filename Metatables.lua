@@ -14,6 +14,8 @@
 
 local variable_pattern = "[%w_][%w_%d%[%]%.]*"
 
+local debug_enabled = false
+
 local supported_metamethods = {
 	__add = {
 		replace_pattern = "MT__add(%s, %s)",
@@ -62,11 +64,12 @@ local supported_metamethods = {
 }
 
 local parsed_data = {
-	strings = {}
+	strings = {},
+	variable_graph = {}
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.1) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.2) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -181,6 +184,13 @@ function MT__index(t, index)
 	-- it should never get to this point but alright.
 	return value
 end]]
+
+old_print = print
+print = function(str, force)
+	if debug_enabled or force then
+		old_print(str)
+	end
+end
 
 --- @param x number the number to check if is whole
 --- @return boolean is_whole returns true if x is whole, false if not, nil if x is nil
@@ -327,7 +337,196 @@ local function getAllStrings(text)
 		end
 	)
 
-	print("parsed all strings")
+	print("parsed all strings", true)
+end
+
+local function isString(start, text)
+	for i = 1, #parsed_data.strings do
+		local s = parsed_data.strings[i]
+
+		-- if the last index of this string is greater or equal than the given index
+		if s.location.last >= start then
+			-- if the first index of this string is less or equal than the given index
+			if s.location.start <= start then
+				-- then this string contains the given index, so its a string
+				return true
+			else
+				-- this means that we've passed over where the string could be, so we know we will never get a match past this, so return false early
+				return false
+			end
+		end
+	end
+
+	-- its not in a string, return false
+	return false
+end
+
+local function findPreviousNewline(pos, text)
+	for char_index = pos, 1, -1 do
+		if text:sub(char_index, char_index):match("\n") then
+			return char_index
+		end
+	end
+
+	return 1
+end
+
+local function getVariableGraph(text)
+
+	local function scopeToString(scope)
+		local s = tostring(scope[1])
+
+		for depth = 2, #scope do
+			s = ("%s.%s"):format(s, scope[depth])
+		end
+
+		return s
+	end
+
+	print("creating variable graph", true)
+	-- graph of all variables, to avoid getVariableScopeGraph needing to constantly iter all variables
+
+	local scope_depth = 1
+
+	local scope = {
+		tree = {
+			0
+		},
+		graph = {}
+	}
+
+	local scope_counts = {
+		0
+	}
+
+	local previous_uncommented_end = 0
+	local previous_end = 0
+
+	local lua_words = 0
+
+	-- go through all "lua words"
+	for lua_word in text:gmatch(variable_pattern) do
+
+		local word_start, word_last = text:find(string.toLiteral(lua_word), previous_end + 1)
+
+		if not word_start then
+			error("word_start is nil! "..text:sub(previous_end, text:len()))
+		end
+
+		local line_start, line_last = text:find("[\n]?[^\n]*"..string.toLiteral(lua_word).."[^\n]*[\n]?", findPreviousNewline(word_start, text))
+
+		-- trim the new lines
+		line_start = line_start + 1
+		line_last = line_last - 1
+		--print("debug: "..text:sub(previous_uncommented_end, word_last))
+
+		--print("lua word: "..lua_word)
+		-- filter out table indicies
+		local prev_char = text:sub(word_start-1, word_start-1)
+		if prev_char == "." or prev_char == ":" then
+			goto getVariableGraph_nextWord
+		end
+
+		-- remove anything after a period or colon
+		local new_lua_word = lua_word:gsub("([^:%.])([:%.].*)", "%1")
+
+		-- adjust the last char from the modified string
+		if new_lua_word ~= lua_word then
+			word_last = word_last - (lua_word:len() - new_lua_word:len())
+		end
+
+		lua_word = new_lua_word
+
+		dbg_previous_end = previous_end
+
+		--print("modified lua word: "..lua_word)
+
+		previous_end = word_last
+
+		--TODO: filter out block comments
+
+		-- filter out strings
+		-- TODO: (also may want to trace strings if they match our variable name, they may be used to index the metatable)
+		if isString(word_start, text) then
+			goto getVariableGraph_nextWord
+		end
+
+		-- filter out line comments
+		if text:sub(line_start, word_start):match("%-%-") then
+			goto getVariableGraph_nextWord
+		end
+
+		previous_uncommented_end = word_last
+
+		local prev_scope = scopeToString(scope.tree)
+
+		if lua_word == "function" or lua_word == "if" or lua_word == "do" then
+			scope_depth = scope_depth + 1
+			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
+			scope.tree[scope_depth] = scope_counts[scope_depth]
+
+			goto getVariableGraph_nextWord
+		elseif lua_word == "else" or lua_word == "elseif" then
+			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
+			--scope.tree[scope_depth] = scope.tree[scope_depth] + 1
+
+			goto getVariableGraph_nextWord
+		elseif lua_word == "end" then
+			scope.tree[scope_depth] = nil
+			scope_depth = scope_depth - 1
+
+			goto getVariableGraph_nextWord
+		end
+
+		if lua_word == "function" then
+			table.insert(function_references, {
+				scope = scopeToString(scope.tree),
+				defined_in_scope = prev_scope,
+				location = {
+					start = word_start,
+					last = word_last
+				}
+			})
+
+			goto getVariableGraph_nextWord
+		end
+
+		if not parsed_data.variable_graph[lua_word] then
+			print("found new lua_word: "..lua_word)
+			parsed_data.variable_graph[lua_word] = {}
+
+			lua_words = lua_words + 1
+		end
+
+		local scope_string = scopeToString(scope.tree)
+
+		local node_data = {
+			location = {
+				start = word_start,
+				last = word_last
+			},
+			line_location = {
+				start = line_start,
+				last = line_last
+			},
+			line_string = text:sub(line_start, line_last),
+			word_string = lua_word,
+			scope = scope_string
+		}
+
+		if lua_word:sub(lua_word:len(), lua_word:len()) == "[" then
+			node_data.word_string = node_data.word_string:sub(1, lua_word:len() - 1)
+			node_data.location.last = node_data.location.last - 1
+			lua_word = node_data.word_string
+		end
+
+		table.insert(parsed_data.variable_graph[lua_word], node_data)
+
+		::getVariableGraph_nextWord::
+
+	end
+
+	print("parsed variable graph, unique lua_words: "..lua_words, true)
 end
 
 local function findAliases(variable_name, script_text)
@@ -367,7 +566,7 @@ local function findClosure(char_index, text)
 
 	local text_crop = text:sub(char_index + 1, text_length)
 
-	local lowest_closure = math.huge
+	local lowest_closure = text_length
 
 	for closure_index = 1, #closures do
 		local closure = closures[closure_index]
@@ -477,6 +676,11 @@ local function getParams(funct_open, funct_close, text)
 		-- the parametre string
 		local param_str = param_string:sub(param_start, param_end)
 
+		-- make sure this isnt just a comment
+		if param_str:match("%-%-") then
+			goto getParams_continue_param
+		end
+
 		if scope_depth == 0 then
 			last_scopeless_start = param_start
 		end
@@ -517,6 +721,8 @@ local function getParams(funct_open, funct_close, text)
 			print("param name: "..params[#params].name)
 			print("param name from loc: "..text:sub(params[#params].location.start, params[#params].location.last))
 		end
+
+		::getParams_continue_param::
 	end
 
 	return params
@@ -547,16 +753,6 @@ local function getUseData(first, last, text)
 	end
 
 	return use_data
-end
-
-local function findPreviousNewline(pos, text)
-	for char_index = pos, 1, -1 do
-		if text:sub(char_index, char_index):match("\n") then
-			return char_index
-		end
-	end
-
-	return 1
 end
 
 local function mergeVariableScopeGraphReferences(scope_graph)
@@ -598,28 +794,363 @@ local function filterVariableScopeGraph(scope_graphs, variable)
 	end
 end
 
-local function isString(start, text)
-	for i = 1, #parsed_data.strings do
-		local s = parsed_data.strings[i]
+local function getVariableScopeGraph(variable_name, text, avoids)
 
-		-- if the last index of this string is greater or equal than the given index
-		if s.location.last >= start then
-			-- if the first index of this string is less or equal than the given index
-			if s.location.start <= start then
-				-- then this string contains the given index, so its a string
-				return true
-			else
-				-- this means that we've passed over where the string could be, so we know we will never get a match past this, so return false early
+	local function scopeToString(scope)
+		local s = tostring(scope[1])
+
+		for depth = 2, #scope do
+			s = ("%s.%s"):format(s, scope[depth])
+		end
+
+		return s
+	end
+
+	local function canIter(variable, category)
+		if not avoids then
+			return true
+		end
+
+		if not avoids[category] then
+			return true
+		end
+
+		for avoid_index = 1, #avoids[category] do
+			local avoid_var = avoids[category][avoid_index]
+
+			if avoid_var.name == variable.name and avoid_var.location.start == variable.location.start and avoid_var.location.last == variable.location.last then
 				return false
 			end
 		end
+
+		return true
 	end
 
-	-- its not in a string, return false
-	return false
+	local scope_depth = 1
+
+	local scope = {
+		tree = {
+			0
+		},
+		graph = {}
+	}
+
+	local scope_counts = {
+		0
+	}
+
+	local function_references = {}
+
+	local defined_graph = {}
+
+	local forced_locals = {}
+	
+	local previous_uncommented_end = 0
+	local previous_end = 0
+
+	if not parsed_data.variable_graph[variable_name] then
+		return {}
+	end
+
+	-- go through all "lua words"
+	for _, node_data in ipairs(parsed_data.variable_graph[variable_name]) do
+
+		local word_start = node_data.location.start
+		local word_last = node_data.location.last
+		
+		if not word_start then
+			error("word_start is nil! "..text:sub(previous_end, text:len()))
+		end
+
+		local line_start = node_data.line_location.start
+		local line_last = node_data.line_location.last
+
+		-- trim the new lines
+		line_start = line_start + 1
+		line_last = line_last - 1
+		--print("debug: "..text:sub(previous_uncommented_end, word_last))
+
+		--print("lua word: "..lua_word)
+		-- filter out table indicies
+		local prev_char = text:sub(word_start-1, word_start-1)
+
+		-- remove anything after a period or colon
+		local new_lua_word = variable_name:gsub("([^:%.])([:%.].*)", "%1")
+
+		-- adjust the last char from the modified string
+		if new_lua_word ~= variable_name then
+			word_last = word_last - (variable_name:len() - new_lua_word:len())
+		end
+
+		variable_name = new_lua_word
+
+		dbg_previous_end = previous_end
+
+		--print("modified lua word: "..lua_word)
+
+		local scope_string = scopeToString(scope.tree)
+
+		--[[local node_data = {
+			location = {
+				start = word_start,
+				last = word_last
+			},
+			line_location = {
+				start = line_start,
+				last = line_last
+			},
+			line_string = text:sub(line_start, line_last),
+			word_string = variable_name,
+			scope = scope_string
+		}]]
+
+		--[[if variable_name:sub(variable_name:len(), variable_name:len()) == "[" then
+			node_data.word_string = node_data.word_string:sub(1, variable_name:len() - 1)
+			node_data.location.last = node_data.location.last - 1
+			variable_name = node_data.word_string
+		end
+
+		if lua_word == "a" then
+			print()
+		end]]
+
+		local is_var_defined = false
+		local graph_id = #scope.graph
+
+		for _, defined_scope in ipairs(defined_graph) do
+			if scope_string:match("^"..defined_scope.scope) then
+
+				local forced_local = false
+				for forced_local_index = 1, #forced_locals do
+					if forced_locals[forced_local_index].scope_string == scope_string then
+						forced_local = true
+					end
+				end
+
+
+				if not forced_local or defined_scope.scope:match("^"..scope_string) then
+					--print("def scope: "..defined_scope.scope.." scope_string: "..scope_string)
+					is_var_defined = true
+					graph_id = defined_scope.graph_id
+					break
+				end
+			end
+		end
+
+		-- check if this a function param
+		local prev_function = function_references[#function_references]
+
+		local forced_local = false
+
+		if prev_function then
+			local open_bracket, _ = text:find("%(", prev_function.location.last)
+
+			-- if this is a param
+			if word_last < findClosure(open_bracket, text) then
+				is_var_defined = false
+				forced_local = true
+			end
+
+			-- this is a function's name
+			if text:find("function "..lua_word, line_start) then
+				is_var_defined = false
+				scope_string = prev_function.defined_in_scope
+				node_data.scope = scope_string
+			end
+		end
+
+		--local prev_funct_start, prev_funct_last = text:find("function", )
+
+		if is_var_defined then
+			if lua_word == "vec" then
+				print()
+			end
+			table.insert(scope.graph[graph_id].references, node_data)
+		else
+			if lua_word == "vec" then
+				print()
+			end
+			node_data.references = {}
+			node_data.graph_id = #scope.graph + 1
+			table.insert(scope.graph, node_data)
+
+			table.insert(defined_graph, {
+				pos = word_last,
+				scope = scope_string,
+				graph_id = node_data.graph_id
+			})
+
+			if forced_local then
+				table.insert(forced_locals, {
+					pos = word_last,
+					scope_string = scope_string
+				})
+			end
+		end
+
+		if is_var_defined then
+			local equals_start, _, equals_str = node_data.line_string:find("( *= *).*"..variable_name:toLiteral())
+
+			if equals_start then
+				-- we have to calculate this manually, as it doesn't understand we only want the length of the equals bit
+				local equals_last = equals_start + equals_str:len() - 1
+
+				local search_start = 1
+
+				-- adjust param search if this is declared local.
+				local set_local_start, set_local_last = node_data.line_string:find("%s*local%s*")
+				if set_local_start then
+					if set_local_start < equals_start then
+						search_start = set_local_last + 1
+					end
+				end
+
+				-- find the param we're aliasing our variable to
+				local set_to = getParams(equals_last + 1, node_data.line_string:len(), node_data.line_string)
+				local set_as = getParams(search_start, equals_start - 1, node_data.line_string)
+
+				for set_to_index = 1, #set_to do
+					--if set_to[set_to_index].name:gsub("("..variable_name..")(%(.*%))", "%1") == variable_name then
+					--TODO: support no spaces in equations
+					if set_to[set_to_index].name:match(""..variable_name:toLiteral().."") then
+
+						if not set_as[set_to_index] then
+							print("Theres a param to set this value to, but nothing to set it as! "..set_to[set_to_index].name)
+							goto getVariableScopeGraph_continue_setTo
+						end
+
+						if not canIter(set_as[set_to_index], "functions") then
+							goto getVariableScopeGraph_continue_setTo
+						end
+
+						avoids = avoids or {}
+
+						avoids.functions = avoids.functions or {}
+
+						table.insert(avoids.functions, set_as[set_to_index])
+
+						local alias_scope_graphs = getVariableScopeGraph(set_as[set_to_index].name, text, avoids)
+
+						--print(string.fromTable(alias_scope_graphs))
+
+						local adjusted_alias_variable = {
+							name = set_as[set_to_index].name,
+							location = {
+								start = set_as[set_to_index].location.start + line_start - 1,
+								last = set_as[set_to_index].location.last + line_start - 1
+							}
+						}
+						
+						local alias_scope_graph = mergeVariableScopeGraphReferences(filterVariableScopeGraph(alias_scope_graphs, adjusted_alias_variable))
+
+						if not alias_scope_graph then
+							print("Failed to get alias scope graph?")
+						else
+							for alias_scope_graph_index = 1, #alias_scope_graph do
+
+								scope.graph[graph_id].references = scope.graph[graph_id].references or {}
+								table.insert(scope.graph[graph_id].references, alias_scope_graph[alias_scope_graph_index])
+							end
+						end
+
+						print()
+					end
+
+					::getVariableScopeGraph_continue_setTo::
+				end
+
+				print()
+			end
+
+			print()
+
+			-- check for a return statement
+
+			local return_start, _, return_string = node_data.line_string:find("(return *).*"..variable_name)
+
+			if return_start then
+
+				local return_last = return_start + return_string:len()
+
+				local returning_params = getParams(return_last, node_data.line_string:len(), node_data.line_string)
+
+				-- find the function this return statement would be returning to
+
+				-- find the function linked to this return
+				local function_reference = nil
+				for reference_depth = #function_references, 1, -1 do
+					local reference = function_references[reference_depth]
+					if scope_string:match(reference.scope) then
+						function_reference = reference
+						break
+					end
+				end
+
+				
+				if not function_reference then
+					print("failed to find function reference?")
+				else
+					local function_name_start, function_name_last = text:find(variable_pattern, function_reference.location.last+1)
+					local function_name = text:sub(function_name_start, function_name_last)
+
+					local function_variable = {
+						name = function_name,
+						location = {
+							start = function_name_start,
+							last = function_name_last
+						}
+					}
+
+					-- check if we can iter this function, used to avoid a never ending loop with function returns (as when it traces the function, it will then go through the function again)
+					if canIter(function_variable, "functions") then
+
+						avoids = avoids or {}
+
+						avoids.functions = avoids.functions or {}
+
+						table.insert(avoids.functions, function_variable)
+
+						local function_scope_graphs = getVariableScopeGraph(function_name, text, avoids)
+
+						-- filter out referencea to this function
+						for graph_index = #function_scope_graphs, 1, -1 do
+							local graph = function_scope_graphs[graph_index]
+
+							if graph.location.start == function_name_start and graph.location.last == function_name_last then
+								table.remove(function_scope_graphs, graph_index)
+							end
+						end
+
+						-- merge all of the scope graphs returned
+						for graph_index = 1, #function_scope_graphs do
+							function_scope_graphs[graph_index] = mergeVariableScopeGraphReferences(function_scope_graphs[graph_index])
+						end
+
+						-- go through all of these graphes, in search for more metamethod references.
+						for graph_index = 1, #function_scope_graphs do
+							
+						end
+
+						--function_scope_graph = mergeVariableScopeGraphReferences(filterVariableScopeGraph(function_scope_graph, function_variable))
+						print()
+					end
+				end
+			end
+		end
+
+		--print(lua_word..": "..scope.tree[scope_depth])
+
+		::next_word::
+	end
+
+	--print(string.fromTable(scope.graph))
+
+	--print(string.fromTable(forced_locals))
+
+	return scope.graph
 end
 
-local function getVariableScopeGraph(variable_name, text, avoids)
+--[[local function getVariableScopeGraph(variable_name, text, avoids)
 
 	local function scopeToString(scope)
 		local s = tostring(scope[1])
@@ -736,7 +1267,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
 			scope.tree[scope_depth] = scope_counts[scope_depth]
 		elseif lua_word == "else" or lua_word == "elseif" then
-			scope.tree[scope_depth] = scope[scope_depth] + 1
+			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
+			--scope.tree[scope_depth] = scope.tree[scope_depth] + 1
 		elseif lua_word == "end" then
 			scope.tree[scope_depth] = nil
 			scope_depth = scope_depth - 1
@@ -883,6 +1415,22 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 						--if set_to[set_to_index].name:gsub("("..variable_name..")(%(.*%))", "%1") == variable_name then
 						--TODO: support no spaces in equations
 						if set_to[set_to_index].name:match(""..variable_name.."") then
+
+							if not set_as[set_to_index] then
+								print("Theres a param to set this value to, but nothing to set it as! "..set_to[set_to_index].name)
+								goto getVariableScopeGraph_continue_setTo
+							end
+
+							if not canIter(set_as[set_to_index], "functions") then
+								goto getVariableScopeGraph_continue_setTo
+							end
+
+							avoids = avoids or {}
+
+							avoids.functions = avoids.functions or {}
+
+							table.insert(avoids.functions, set_as[set_to_index])
+
 							local alias_scope_graphs = getVariableScopeGraph(set_as[set_to_index].name, text, avoids)
 
 							--print(string.fromTable(alias_scope_graphs))
@@ -907,6 +1455,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 							print()
 						end
+
+						::getVariableScopeGraph_continue_setTo::
 					end
 
 					print()
@@ -999,7 +1549,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 	--print(string.fromTable(forced_locals))
 
 	return scope.graph
-end
+end]]
+
 
 --[[local function getScope(pos, text)
 	local scope_depth = 1
@@ -1032,7 +1583,7 @@ end
 		local line_start, line_last = text:find("[\n]?[^\n]*"..lua_word, previous_uncommented_end)
 
 		previous_end = word_last
-
+		
 		--TODO: filter out block comments
 
 		--TODO: filter out strings
@@ -1074,7 +1625,7 @@ local function getStringOccurances(str, text)
 	return occurances
 end
 
-local function getVariableGraph(variable_name, text)
+--[[local function getVariableGraph(variable_name, text)
 	local var_pat = "[^%w%d_%.]+("..variable_name..")[^%w%d_]+"
 	--local var_pat = variable_name
 
@@ -1083,7 +1634,7 @@ local function getVariableGraph(variable_name, text)
 	local name_uses = getStringOccurances(var_pat, text)
 
 	print(name_uses)
-end
+end]]
 
 local function getAllVariableUses(variable, script_text)
 
@@ -1327,6 +1878,10 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 						local start_table, start_index = instance.line_string:find(instance.word_string:toLiteral()..char, instance.location.start - instance.line_location.start)
 						local last_index
 
+						if not start_index then
+							break
+						end
+
 						if char == "%[" then
 							print("brr")
 							last_index = findClosure(start_index, instance.line_string)
@@ -1336,7 +1891,15 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 
 						--start_table = start_table - 1
 
+						if not start_index then
+							break
+						end
+
 						local table_string = instance.line_string:sub(start_table, start_index - 1)
+
+						if not last_index then
+							break
+						end
 
 						local index_string = instance.line_string:sub(start_index + 1, last_index)
 
@@ -1350,6 +1913,10 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 						end
 
 						local replace_str = supported_metamethods[metamethod_field].replace_pattern:format(table_string, index_string)
+
+						if not last_index then
+							break
+						end
 
 						local g_table_start = start_table + instance.line_location.start - 1
 						local g_index_last = last_index + instance.line_location.start - 1
@@ -1430,9 +1997,13 @@ end
 
 function setupMetatables(script_text, script_path, metatable_usage_detection_mode)
 
+	if not script_text then
+		return
+	end
+
 	local start_time = os.clock()
 
-	print("setting up metatables for script "..script_path)
+	print("setting up metatables for script "..script_path, true)
 	--local definitions = {}
 
 	--[[definitions.setmetatable = findAliases("setmetatable", script_text)
@@ -1442,11 +2013,13 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 	end]]
 
 	if not script_text:match("setmetatable") and metatable_usage_detection_mode ~= "everything" then
-		print("no references to setmetatable, skipping metatable support setup.")
+		print("no references to setmetatable, skipping metatable support setup.", true)
 		return
 	end
 
 	getAllStrings(script_text)
+
+	getVariableGraph(script_text)
 
 	local script_text_len = script_text:len()
 
@@ -1472,21 +2045,23 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 	print("finding possible metamethod calls")
 
 	if metatable_usage_detection_mode == "everything" then
-		local scope_graph = getVariableScopeGraph(variable_pattern, script_text)
+		for variable_name, _ in pairs(parsed_data.variable_graph) do
+			local scope_graph = getVariableScopeGraph(variable_name, script_text)
 
 
-		local variable_pattern_variable = {
-			name = variable_pattern,
-			location = {
-				start = -1,
-				last = 0
+			local variable_pattern_variable = {
+				name = variable_name,
+				location = {
+					start = -1,
+					last = 0
+				}
 			}
-		}
 
-		local graph = filterVariableScopeGraph(scope_graph, variable_pattern_variable)
+			local graph = filterVariableScopeGraph(scope_graph, variable_pattern_variable)
 
-		if graph then
-			findMetamethods(graph, metatable_definitions, {}, script_text)
+			if graph then
+				findMetamethods(graph, metatable_definitions, {}, script_text)
+			end
 		end
 	end
 
@@ -1528,7 +2103,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	print(string.fromTable(metamethods_to_write))
 
-	print("preparing to modify script...")
+	print("preparing to modify script...", true)
 
 	-- prepare metatable definitions
 
@@ -1576,7 +2151,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 	end]]
 
 	-- setup up metamethods
-	print("setting up metamethods")
+	print("setting up metamethods", true)
 	for mtw_id = 1, #metamethods_to_write do
 		local mtw = metamethods_to_write[mtw_id]
 
@@ -1607,15 +2182,15 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 	end
 
 	-- add metatable definitions
-	print("adding metatable definitions")
+	print("adding metatable definitions", true)
 	script_text = ("%s\n%s"):format(metatable_string, script_text)
 
-	print("adding SWAMS code")
+	print("adding SWAMS code", true)
 	script_text = ("%s\n\n%s"):format(SWAMS_code, script_text)
 
-	print("writing to "..script_path)
+	print("writing to "..script_path, true)
 	LifeBoatAPI.Tools.FileSystemUtils.writeAllText(LifeBoatAPI.Tools.Filepath:new(script_path, true), script_text)
 
-	print(("(SWAMS) completed setting up metatables! Took %ss"):format(os.clock() - start_time))
+	print(("(SWAMS) completed setting up metatables! Took %ss"):format(os.clock() - start_time), true)
 
 end
