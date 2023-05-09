@@ -70,7 +70,7 @@ Let me know if anything is missing here which you think should be included.
 - Metamethods
      - Arithmetic
        - __pow (^)
-       - __umn (-x)
+       - __unm (-x)
        - __idiv (//)
      - Behavioural
        - __newindex
