@@ -61,6 +61,8 @@ The main difference from real Metatables is that it will add a value to your tab
 
 ### Planned
 Let me know if anything is missing here which you think should be included.
+- Features
+     - Save metatable ids to file to ensure they stay the same, to ensure backwards compatibility.
 - Functions
      - getmetatable
      - rawset
