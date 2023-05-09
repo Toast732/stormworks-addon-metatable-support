@@ -50,7 +50,7 @@ The main difference from real Metatables is that it will add a value to your tab
 ### Current
 - Ability to use metatables in SW
 - Functions
--- setmetatable
+     - setmetatable
 - Metamethods
      - __add
      - __sub
