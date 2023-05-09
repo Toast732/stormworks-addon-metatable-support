@@ -52,11 +52,44 @@ The main difference from real Metatables is that it will add a value to your tab
 - Functions
      - setmetatable
 - Metamethods
-     - __add
-     - __sub
-     - __mul
-     - __div
-     - __mod
+     - __add (+)
+     - __sub (-)
+     - __mul (*)
+     - __div (/)
+     - __mod (%)
      - __index
+
+### Planned
+Let me know if anything is missing here which you think should be included.
+- Functions
+     - getmetatable
+     - rawset
+     - rawget
+- Metamethods
+     - Arithmetic
+       - __pow (^)
+       - __umn (-x)
+       - __idiv (//)
+     - Behavioural
+       - __newindex
+       - __call
+       - __tostring
+       - __metatable
+       - __name
+       - __pairs
+     - Relational
+       - __eq (==)
+       - __lt (<)
+       - __le (<=)
+     - Bitwise
+       - __band (&)
+       - __bor (|)
+       - __bxor (binary ~)
+       - __bnot (unary ~)
+       - __shl (<<)
+       - __shr (>>)
+     - Misc
+       - __concat (..)
+       - __len (#)
 
 
