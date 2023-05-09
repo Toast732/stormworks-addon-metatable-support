@@ -52,11 +52,11 @@ The main difference from real Metatables is that it will add a value to your tab
 - Functions
 -- setmetatable
 - Metamethods
--- __add
--- __sub
--- __mul
--- __div
--- __mod
--- __index
+ - __add
+ - __sub
+ - __mul
+ - __div
+ - __mod
+ - __index
 
 
