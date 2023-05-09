@@ -1,4 +1,4 @@
-# stormworks-addon-metatable-support
+# SWAMS
 Allows you to use metatables within stormworks, made specifically for use with addons.
 
 ## WIP: VERY UNSTABLE
