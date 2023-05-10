@@ -142,7 +142,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.3) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.4) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -615,7 +615,6 @@ local function getVariableGraph(text)
 			local time_since_start = os.clock() - start_time
 			print(("%0.2f%% complete creating variable graph (%s/%s) about %0.2fs remaining"):format(percentage*100, variable_amount_setup, variable_amount, variable_amount/variable_amount_setup*time_since_start-time_since_start), true)
 			last_print_count = variable_amount_setup
-
 		end
 
 		local word_start, word_last = text:find(string.toLiteral(lua_word), previous_end + 1)
@@ -1171,6 +1170,7 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		--local prev_funct_start, prev_funct_last = text:find("function", )
 
 		if is_var_defined then
+			print()
 			table.insert(scope.graph[graph_id].references, node_data)
 		else
 			node_data.references = {}
@@ -1239,12 +1239,14 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 						local adjusted_alias_variable = {
 							name = set_as[set_to_index].name,
 							location = {
-								start = set_as[set_to_index].location.start + line_start - 1,
-								last = set_as[set_to_index].location.last + line_start - 1
+								start = set_as[set_to_index].location.start + line_start - 2,
+								last = set_as[set_to_index].location.last + line_start - 2
 							}
 						}
+
+						local filtered_scope_graph = filterVariableScopeGraph(alias_scope_graphs, adjusted_alias_variable)
 						
-						local alias_scope_graph = mergeVariableScopeGraphReferences(filterVariableScopeGraph(alias_scope_graphs, adjusted_alias_variable))
+						local alias_scope_graph = mergeVariableScopeGraphReferences(filtered_scope_graph)
 
 						if not alias_scope_graph then
 							print("Failed to get alias scope graph?")
@@ -1261,11 +1263,59 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 					::getVariableScopeGraph_continue_setTo::
 				end
-
-				print()
 			end
 
-			print()
+			--TODO: support aliasing table.insert
+
+			--TODO: support multilines
+
+			-- check if this is part of table.insert
+			local table_insert_start, table_insert_end = node_data.line_string:find("table.insert%(")
+			if table_insert_start then
+				print("found insert")
+
+				local closure_index = findClosure(table_insert_end, node_data.line_string)
+
+				if closure_index then
+					local params = getParams(table_insert_end + 1, closure_index - 1, node_data.line_string)
+
+					if params then
+						local metatable_container = params[1].name
+
+						local metatable_container_pattern = metatable_container.."%["
+
+						if not params[3] then
+							metatable_container_pattern = metatable_container_pattern..".*]"
+						else
+							metatable_container_pattern = metatable_container_pattern..params[2].name.."]"
+						end
+						
+						-- get graph of all variables which match our pattern
+						for parsed_variable_name, _ in pairs(parsed_data.variable_graph) do
+							if parsed_variable_name:match(metatable_container_pattern) then
+								local metatable_container_graph = getVariableScopeGraph(parsed_variable_name, text, avoids)
+								
+								local filtered_scope_graph = filterVariableScopeGraph(metatable_container_graph, {
+									name = parsed_variable_name,
+									location = {
+										start = -1,
+										last = -1
+									}
+								})
+
+								local alias_scope_graph = mergeVariableScopeGraphReferences(filtered_scope_graph)
+
+								if alias_scope_graph then
+									scope.graph[graph_id].references = scope.graph[graph_id].references or {}
+									for alias_scope_graph_index = 1, #alias_scope_graph do
+										table.insert(scope.graph[graph_id].references, alias_scope_graph[alias_scope_graph_index])
+									end
+								end
+							end
+						end
+					end
+				end
+			end
 
 			-- check for a return statement
 
@@ -2256,8 +2306,6 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	getVariableGraph(script_text)
 
-	local script_text_len = script_text:len()
-
 	local setmetatable_definition = {
 		name = "setmetatable",
 		location = {
@@ -2300,7 +2348,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 		end
 	end
 
-	if metatable_usage_detection_mode == "aggressive" then
+	if metatable_usage_detection_mode == "smart" then
 		for setmetatable_index = 1, #setmetatables do
 			-- local metatabled_table_uses = getVariableGraph(setmetatables[setmetatable_index].params[1].name, script_text)
 
