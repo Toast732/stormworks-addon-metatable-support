@@ -16,43 +16,115 @@ local variable_pattern = "[%w_][%w_%d%[%]%.]*"
 
 local debug_enabled = false
 
-local supported_metamethods = {
-	__add = {
-		replace_pattern = "MT__add(%s, %s)",
-		chars = {
-			"+"
+local target_pattern_defs = {
+	artihmetic_two_variables = {
+		{
+			match = {
+				pattern = ("%s ?%%1 ?%%2"):format(variable_pattern),
+				params = {
+					"percent_literal_char",
+					"percent_literal_var"
+				}
+			},
+			find = {
+				pattern = ("(%s) ?%%1 ?(%s)"):format(variable_pattern, variable_pattern),
+				params = {
+					"percent_literal_char"
+				}
+			}
 		},
-		handling = "arithmetic"
+		{
+			match = {
+				pattern = ("%%1 ?%%2 ?%s"):format(variable_pattern),
+				params = {
+					"percent_literal_var",
+					"percent_literal_char"
+				}
+			},
+			find = {
+				pattern = ("(%s) ?%%1 ?(%s)"):format(variable_pattern, variable_pattern),
+				params = {
+					"percent_literal_char"
+				}
+			}
+		}
 	},
-	__sub = {
-		replace_pattern = "MT__sub(%s, %s)",
+	artihmetic_one_variable = {
+		{
+			match = {
+				pattern = ("[^%s]? %%1 ?%%2"):format(variable_pattern),
+				params = {
+					"percent_literal_char",
+					"percent_literal_var"
+				}
+			},
+			find = {
+				pattern = ("%%1 ?(%s)"):format(variable_pattern),
+				params = {
+					"percent_literal_char"
+				}
+			}
+		}
+	}
+}
+
+local supported_metamethods = {
+	{
+		name = "__unm",
+		replace_pattern = "MT__unm(%s)",
+		target_patterns = target_pattern_defs.artihmetic_one_variable,
 		chars = {
 			"-"
 		},
 		handling = "arithmetic"
 	},
-	__mul = {
+	{
+		name = "__add",
+		replace_pattern = "MT__add(%s, %s)",
+		target_patterns = target_pattern_defs.artihmetic_two_variables,
+		chars = {
+			"+"
+		},
+		handling = "arithmetic"
+	},
+	{
+		name = "__sub",
+		replace_pattern = "MT__sub(%s, %s)",
+		target_patterns = target_pattern_defs.artihmetic_two_variables,
+		chars = {
+			"-"
+		},
+		handling = "arithmetic"
+	},
+	{
+		name = "__mul",
 		replace_pattern = "MT__mul(%s, %s)",
+		target_patterns = target_pattern_defs.artihmetic_two_variables,
 		chars = {
 			"*"
 		},
 		handling = "arithmetic"
 	},
-	__div = {
+	{
+		name = "__div",
 		replace_pattern = "MT__div(%s, %s)",
+		target_patterns = target_pattern_defs.artihmetic_two_variables,
 		chars = {
 			"/"
 		},
 		handling = "arithmetic"
 	},
-	__mod = {
+	{
+		name = "__mod",
 		replace_pattern = "MT__mod(%s, %s)",
+		target_patterns = target_pattern_defs.artihmetic_two_variables,
 		chars = {
 			"%%"
 		},
 		handling = "arithmetic"
 	},
-	__index = {
+	{
+		name = "__index",
 		replace_pattern = "MT__index(%s, %s)",
 		chars = {
 			"%.",
@@ -65,11 +137,12 @@ local supported_metamethods = {
 
 local parsed_data = {
 	strings = {},
-	variable_graph = {}
+	variable_graph = {},
+	aliases = {}
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.2) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.3) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -149,6 +222,14 @@ function MT__mod(param1, param2)
 	return param1 % param2
 end
 
+function MT__unm(param)
+	if param.__TEA_metatable_id and TEA.metatables[param.__TEA_metatable_id].__unm then
+		return TEA.metatables[param.__TEA_metatable_id].__unm(param)
+	end
+
+	return -param
+end
+
 -- __index metamethod
 function MT__index(t, index)
 	local value = t[index]
@@ -191,6 +272,11 @@ print = function(str, force)
 		old_print(str)
 	end
 end
+
+local variable_amount = 0
+local amount_per_print = 0
+local last_print_count = 0
+local variable_amount_setup = 0
 
 --- @param x number the number to check if is whole
 --- @return boolean is_whole returns true if x is whole, false if not, nil if x is nil
@@ -263,8 +349,85 @@ function string.fromTable(t)
 	return tableToString(t)
 end
 
-function string.toLiteral(s)
-	return s:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1")
+function string:toLiteral(literal_percent)
+	if literal_percent then
+		return self:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%%%1")
+	end
+
+	return self:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1")
+end
+
+function string:advancedMatch(patterns, params)
+
+	print(self)
+
+	local function translateParam(pattern, param_index)
+		local param = pattern.params[tonumber(param_index)]
+
+		--print("param type: "..param)
+
+		if param == "var" then
+			return params.var
+		elseif param == "literal_var" then
+			return params.var:toLiteral()
+		elseif param == "percent_literal_var" then
+			return params.var:toLiteral(true)
+		elseif param == "char" then
+			return params.char
+		elseif param == "literal_char" then
+			return params.char:toLiteral()
+		elseif param == "percent_literal_char" then
+			return params.char:toLiteral(true)
+		end
+
+		error("unknown param specified, specified type: "..tostring(param))
+	end
+
+	local function buildInParams(pattern)
+
+		local built_string = pattern.pattern
+
+		for param_index in built_string:gmatch("%%(%d+)") do
+			--print("translated param: "..translateParam(pattern, param_index))
+			built_string = built_string:gsub("%%"..param_index.."([^%d]*)", translateParam(pattern, param_index).."%1")
+		end
+
+		--print("built_string: "..built_string)
+
+		return built_string
+	end
+
+	for pattern_index = 1, #patterns do
+		local pattern = patterns[pattern_index]
+
+		local built_pattern = buildInParams(pattern.match)
+
+		--print("self:toLiteral(): "..self:toLiteral())
+
+		if self:match(built_pattern) then
+			--print("test: "..buildInParams(pattern.find))
+			return self:find(buildInParams(pattern.find))
+		end
+	end
+end
+
+--- returns the number of instances of that character in the string
+---@param str string the string we are wanting to check
+---@param char any the character(s) we are wanting to count for in str, note that this is as a lua pattern
+---@return number count the number of instances of char, if there was an error, count will be 0, and is_success will be false
+---@return boolean is_success if we successfully got the number of instances of the character
+function string.countCharInstances(str, char)
+
+	if type(str) ~= "string" then
+		d.print(("(string.countCharInstances) str is not a string! type of str: %s str: %s"):format(type(str), str), true, 1)
+		return 0, false
+	end
+
+	char = tostring(char)
+
+	local _, count = string.gsub(str, char, "")
+
+	return count, true
 end
 
 local function getAllStrings(text)
@@ -371,6 +534,41 @@ local function findPreviousNewline(pos, text)
 	return 1
 end
 
+local checked_aliases = {}
+
+local function findAliases(variable_name, script_text)
+	local aliases = {
+		variable_name
+	}
+
+	if parsed_data.aliases[variable_name] then
+		return parsed_data.aliases[variable_name]
+	end
+
+	if checked_aliases[variable_name] then return {} end
+
+	checked_aliases[variable_name] = true
+
+	for alias in script_text:gmatch("("..variable_pattern..")[ \n]*=[ \n]*"..variable_name) do
+		if parsed_data.aliases[alias] then
+			for _, alias_alias in pairs(parsed_data.aliases[alias]) do
+				table.insert(aliases, alias_alias)
+			end
+
+		else
+			local alias_aliases = findAliases(alias, script_text)
+			for i = 1, #alias_aliases do
+				print(("found alias of %s: %s"):format(variable_name, alias_aliases[i]))
+				table.insert(aliases, alias_aliases[i])
+			end
+		end
+	end
+
+	parsed_data.aliases[variable_name] = aliases
+
+	return aliases
+end
+
 local function getVariableGraph(text)
 
 	local function scopeToString(scope)
@@ -384,6 +582,7 @@ local function getVariableGraph(text)
 	end
 
 	print("creating variable graph", true)
+	local start_time = os.clock()
 	-- graph of all variables, to avoid getVariableScopeGraph needing to constantly iter all variables
 
 	local scope_depth = 1
@@ -399,6 +598,8 @@ local function getVariableGraph(text)
 		0
 	}
 
+	local function_references = {}
+
 	local previous_uncommented_end = 0
 	local previous_end = 0
 
@@ -406,6 +607,16 @@ local function getVariableGraph(text)
 
 	-- go through all "lua words"
 	for lua_word in text:gmatch(variable_pattern) do
+
+		variable_amount_setup = variable_amount_setup + 1
+
+		if variable_amount_setup - last_print_count >= amount_per_print then
+			local percentage = variable_amount_setup/variable_amount
+			local time_since_start = os.clock() - start_time
+			print(("%0.2f%% complete creating variable graph (%s/%s) about %0.2fs remaining"):format(percentage*100, variable_amount_setup, variable_amount, variable_amount/variable_amount_setup*time_since_start-time_since_start), true)
+			last_print_count = variable_amount_setup
+
+		end
 
 		local word_start, word_last = text:find(string.toLiteral(lua_word), previous_end + 1)
 
@@ -426,6 +637,12 @@ local function getVariableGraph(text)
 		if prev_char == "." or prev_char == ":" then
 			goto getVariableGraph_nextWord
 		end
+
+		-- check if it was set to a function via =
+		--[[if lua_word ~= "function" and text:find(lua_word.."[ \n]*=[ \n]*function", word_start) then
+			print("function defininition found, skipping")
+			goto getVariableGraph_nextWord
+		end]]
 
 		-- remove anything after a period or colon
 		local new_lua_word = lua_word:gsub("([^:%.])([:%.].*)", "%1")
@@ -491,6 +708,14 @@ local function getVariableGraph(text)
 			goto getVariableGraph_nextWord
 		end
 
+		local line_string = text:sub(line_start, line_last)
+
+		-- dont add for function definitions
+		if line_string:match("function ?"..lua_word) then
+			print("function defininition found, skipping")
+			goto getVariableGraph_nextWord
+		end
+
 		if not parsed_data.variable_graph[lua_word] then
 			print("found new lua_word: "..lua_word)
 			parsed_data.variable_graph[lua_word] = {}
@@ -509,7 +734,7 @@ local function getVariableGraph(text)
 				start = line_start,
 				last = line_last
 			},
-			line_string = text:sub(line_start, line_last),
+			line_string = line_string,
 			word_string = lua_word,
 			scope = scope_string
 		}
@@ -526,23 +751,7 @@ local function getVariableGraph(text)
 
 	end
 
-	print("parsed variable graph, unique lua_words: "..lua_words, true)
-end
-
-local function findAliases(variable_name, script_text)
-	local aliases = {
-		variable_name
-	}
-
-	for alias in script_text:gmatch("("..variable_pattern..") *= *"..variable_name) do
-		local alias_aliases = findAliases(alias, script_text)
-		for i = 1, #alias_aliases do
-			print(("found alias of %s: %s"):format(variable_name, alias_aliases[i]))
-			table.insert(aliases, alias_aliases[i])
-		end
-	end
-
-	return aliases
+	print(("parsed variable graph, unique lua_words: %s. took %0.2fs"):format(lua_words, os.clock()-start_time), true)
 end
 
 local function findClosure(char_index, text)
@@ -609,7 +818,7 @@ local function findOpener(char_index, text)
 
 	local closing = text:sub(char_index, char_index)
 
-	local openers = closures_dict[opening]
+	local openers = closures_dict[closing]
 
 	local text_length = text:len()
 
@@ -952,7 +1161,7 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 			end
 
 			-- this is a function's name
-			if text:find("function "..lua_word, line_start) then
+			if text:find("function "..variable_name, line_start) then
 				is_var_defined = false
 				scope_string = prev_function.defined_in_scope
 				node_data.scope = scope_string
@@ -962,14 +1171,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		--local prev_funct_start, prev_funct_last = text:find("function", )
 
 		if is_var_defined then
-			if lua_word == "vec" then
-				print()
-			end
 			table.insert(scope.graph[graph_id].references, node_data)
 		else
-			if lua_word == "vec" then
-				print()
-			end
 			node_data.references = {}
 			node_data.graph_id = #scope.graph + 1
 			table.insert(scope.graph, node_data)
@@ -1583,7 +1786,7 @@ end]]
 		local line_start, line_last = text:find("[\n]?[^\n]*"..lua_word, previous_uncommented_end)
 
 		previous_end = word_last
-		
+
 		--TODO: filter out block comments
 
 		--TODO: filter out strings
@@ -1826,47 +2029,76 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 
 		--TODO: support brackets
 
-		for metamethod_field, metamethod_data in pairs(supported_metamethods) do
+		for _, metamethod_data in ipairs(supported_metamethods) do
 			for i = 1, #metamethod_data.chars do
 				local char = metamethod_data.chars[i]
 				if metamethod_data.handling == "arithmetic" then
-					if instance.line_string:toLiteral():match(" ?"..char:toLiteral().." ?"..instance.word_string:toLiteral()) or instance.line_string:toLiteral():match(instance.word_string:toLiteral().." ?"..char:toLiteral().." ?") then
-						local equation_start, equation_last, eq_param1, eq_param2 = instance.line_string:find("("..variable_pattern..") ?"..char:toLiteral().." ?("..variable_pattern..")")
+					local equation_start, equation_last, eq_param1, eq_param2 = instance.line_string:advancedMatch(metamethod_data.target_patterns, {
+						var = instance.word_string,
+						char = char
+					})
+					if eq_param1 then
+						print()
 
-						local replace_str = supported_metamethods[metamethod_field].replace_pattern:format(eq_param1, eq_param2)
+						local replace_str
 
-						if equation_start then	
+						if eq_param2 then
+							replace_str = metamethod_data.replace_pattern:format(eq_param1, eq_param2)
+						else
+							replace_str = metamethod_data.replace_pattern:format(eq_param1)
+						end
 
-							print("debug!!! but might work??? !!!"..instance.line_string:sub(equation_start, equation_last))
+						print("debug!!! but might work??? !!!"..instance.line_string:sub(equation_start, equation_last))
 
-							-- translate the equation start and last to the entire script's text location
-							equation_start = equation_start + instance.line_location.start - 1
-							equation_last = equation_last + instance.line_location.start - 1
+						-- translate the equation start and last to the entire script's text location
+						equation_start = equation_start + instance.line_location.start - 1
+						equation_last = equation_last + instance.line_location.start - 1
 
-							print("debug!!! "..script_text:sub(equation_start, equation_last))
+						print("debug!!! "..script_text:sub(equation_start, equation_last))
 
-							-- check if we've already got this one
-							local has_written = false
-							-- backwards search as its probably more likely it was closer to the end than the start.
-							for i = #metamethods_to_write, 1, -1 do
-								local mtw = metamethods_to_write[i]
+						-- check if we've already got this one
+						local has_written = false
+						-- backwards search as its probably more likely it was closer to the end than the start.
+						for i = #metamethods_to_write, 1, -1 do
+							local mtw = metamethods_to_write[i]
 
-								if mtw.location.start == equation_start and mtw.location.last == equation_last and mtw.replace_str == replace_str then
-									has_written = true
-									break
+							if mtw.location.start == equation_start or mtw.location.last == equation_last or mtw.replace_str == replace_str then
+								has_written = true
+								break
+							end
+
+							-- our variable has been moved, so we should try to move ourselves.
+
+							--[[if not eq_param2 then
+								if mtw.location.start == equation_last then
+									local start_move_amount, last_move_amount = mtw.replace_str:find(eq_param1)
+									print()
+
+									if start_move_amount then
+										equation_last = equation_last + last_move_amount
+										equation_start = equation_start + start_move_amount
+									end
+								elseif mtw.location.last == equation_start then
+									local start_move_amount, last_move_amount = mtw.replace_str:find(eq_param1)
+									print()
+
+									if start_move_amount then
+										equation_last = equation_last + last_move_amount
+										equation_start = equation_start + start_move_amount
+									end
 								end
-							end
+							end]]
+						end
 
-							if not has_written then
+						if not has_written then
 
-								table.insert(metamethods_to_write, {
-									location = {
-										start = equation_start,
-										last = equation_last
-									},
-									replace_str = replace_str
-								})
-							end
+							table.insert(metamethods_to_write, {
+								location = {
+									start = equation_start,
+									last = equation_last
+								},
+								replace_str = replace_str
+							})
 						end
 					end
 				elseif metamethod_data.handling == "index" then
@@ -1912,7 +2144,7 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 							index_string = index_string:sub(1, index_string:len() - 1)
 						end
 
-						local replace_str = supported_metamethods[metamethod_field].replace_pattern:format(table_string, index_string)
+						local replace_str = metamethod_data.replace_pattern:format(table_string, index_string)
 
 						if not last_index then
 							break
@@ -2018,6 +2250,9 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 	end
 
 	getAllStrings(script_text)
+
+	variable_amount = script_text:countCharInstances(variable_pattern)
+	amount_per_print = math.floor(variable_amount * 0.05)
 
 	getVariableGraph(script_text)
 

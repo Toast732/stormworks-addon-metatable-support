@@ -40,24 +40,27 @@ The main difference from real Metatables is that it will add a value to your tab
 
 ## Known Issues
 - Struggles with nested metatables
+- Struggles with arithmetic metatables on the same line
 - Difficulty with metatables stored in tables with dynamic indexes (eg: arrays)
-- adds __index metamethod to the function definitions
-- treats negative numbers as __sub metamethod
 - sometimes will insert improperly
 
 ## Features
 
 ### Current
-- Ability to use metatables in SW
+- Features
+	 - Ability to use metatables in SW
 - Functions
      - setmetatable
 - Metamethods
-     - __add (+)
-     - __sub (-)
-     - __mul (*)
-     - __div (/)
-     - __mod (%)
-     - __index
+	 - Arithmetic
+       - __add (+)
+       - __sub (-)
+       - __mul (*)
+       - __div (/)
+       - __mod (%)
+	   - __unm (-x)
+	 - Behavioural
+       - __index
 
 ### Planned
 Let me know if anything is missing here which you think should be included.
@@ -70,7 +73,6 @@ Let me know if anything is missing here which you think should be included.
 - Metamethods
      - Arithmetic
        - __pow (^)
-       - __unm (-x)
        - __idiv (//)
      - Behavioural
        - __newindex
