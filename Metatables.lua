@@ -142,7 +142,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.4) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.5) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -1170,7 +1170,6 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		--local prev_funct_start, prev_funct_last = text:find("function", )
 
 		if is_var_defined then
-			print()
 			table.insert(scope.graph[graph_id].references, node_data)
 		else
 			node_data.references = {}
@@ -1257,8 +1256,6 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 								table.insert(scope.graph[graph_id].references, alias_scope_graph[alias_scope_graph_index])
 							end
 						end
-
-						print()
 					end
 
 					::getVariableScopeGraph_continue_setTo::
@@ -1385,7 +1382,6 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 						end
 
 						--function_scope_graph = mergeVariableScopeGraphReferences(filterVariableScopeGraph(function_scope_graph, function_variable))
-						print()
 					end
 				end
 			end
@@ -2065,9 +2061,6 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 	table.insert(variable_instances, 1, variable_definition)
 
 	-- search for metamethods its using
-	print("found graph!")
-
-	--local metatable_definition = metatable_definitions[setmetatable_data.metatable_id].name
 
 	-- find the uses of the metamethods
 	for variable_instance_id = 1, #variable_instances do
@@ -2088,7 +2081,6 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 						char = char
 					})
 					if eq_param1 then
-						print()
 
 						local replace_str
 
@@ -2223,6 +2215,40 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 								},
 								replace_str = replace_str
 							})
+
+							-- if this is via :, then we should put the metatable as the first parametre
+							if char == ":" then
+								-- check if the character after the index string is a (, that means its a table call
+								if instance.line_string:sub(last_index + 1, last_index + 1) == "(" then
+									-- find the closing bracket
+									local closure = findClosure(last_index + instance.line_location.start, script_text)
+
+									if closure then
+										-- get the params
+										local params = getParams(last_index + instance.line_location.start + 1, closure - 1, script_text)
+
+										-- make sure we got the params
+										if params then
+
+											-- the string we're going to insert
+											local insert_string = table_string
+
+											-- if theres a param already, we will want to add a comma and a space after the text we're inserting
+											if params[1] then
+												insert_string = insert_string..", "
+											end
+
+											table.insert(metamethods_to_write, {
+												location = {
+													start = last_index + instance.line_location.start + 1,
+													last = last_index + instance.line_location.start
+												},
+												replace_str = insert_string
+											})
+										end
+									end
+								end
+							end
 						end
 					end
 				end
@@ -2325,7 +2351,9 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	local metatable_definitions, setmetatables = findMetatableDefinitions(setmetatables, script_text)
 
-	print("finding possible metamethod calls")
+	print("finding possible metamethod calls", true)
+
+	local find_possible_metamethod_calls_start = os.clock()
 
 	if metatable_usage_detection_mode == "everything" then
 		for variable_name, _ in pairs(parsed_data.variable_graph) do
@@ -2363,26 +2391,13 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 			if graph then
 
 				findMetamethods(graph, metatable_definitions, setmetatable_data, script_text)
-
-
-				--[[local used_metamethods = {}
-
-				-- get the metamethods this metatable has defined
-				for metamethod in metatable_definition:gmatch("__"..variable_pattern) do
-					print("found metamethod: "..metamethod)
-
-					if supported_metamethods[metamethod] then
-						used_metamethods[metamethod] = true
-					end
-				end]]
 			else
 				print("Failed to find the graph?")
 			end
-		
-			--print("ajshsh: "..script_text:sub(setmetatables[setmetatable_index].params[1].location.start, setmetatables[setmetatable_index].params[1].location.last))
-			--print(string.fromTable(metatabled_table_uses))
 		end
 	end
+
+	print(("found %s possible metamethod calls, took %0.2fs"):format(#metamethods_to_write, os.clock() - find_possible_metamethod_calls_start), true)
 
 	print(string.fromTable(metamethods_to_write))
 
