@@ -142,7 +142,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.5) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.6) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -170,6 +170,8 @@ function setmetatable(self, TEA_metatable_id)
 	end
 
 	self.__TEA_metatable_id = TEA_metatable_id
+
+	return self
 end
 
 function MT__add(param1, param2)
@@ -2405,9 +2407,9 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	-- prepare metatable definitions
 
-	local metatable_string = "TEA = {\n	metatables = {\n"
+	local metatable_string = "TEA = {\n	metatables = {}\n}"
 
-	for metatable_id = 1, #metatable_definitions do
+	--[[for metatable_id = 1, #metatable_definitions do
 		local metatable = metatable_definitions[metatable_id]
 		
 		if metatable_id ~= 1 then
@@ -2427,7 +2429,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 		metatable_string = ("%s%s"):format(metatable_string, str)
 	end
 
-	metatable_string = metatable_string.."\n	}\n}"
+	metatable_string = metatable_string.."\n	}\n}"]]
 
 	-- modify the setmetatable functions
 
@@ -2470,6 +2472,14 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 
 		script_text = insertString(metatable_definition_id, metatable_definition.location.start, metatable_definition.location.last, script_text)
+
+		-- insert the metatable definition
+
+		local metatable_definition_string = ("\nTEA.metatables[%s] = %s\n"):format(metatable_definition_id, metatable_definition.name)
+
+		-- location is + character length of the metatable id to avoid overwriting the id set.
+		local metatable_defininition_insert_location = metatable_definition.location.last + tostring(metatable_definition_id):len()
+		script_text = insertString(metatable_definition_string, metatable_defininition_insert_location, metatable_defininition_insert_location, script_text)
 		-- handle local
 		--[[if script_text:sub(full_definition_start - 6, full_definition_start - 1) == "local " then
 			full_definition_start = full_definition_start - 6
