@@ -41,7 +41,7 @@ The main difference from real Metatables is that it will add a value to your tab
 ## Known Issues
 - Struggles with nested metatables
 - Struggles with arithmetic metatables on the same line
-- Difficulty with metatables stored in tables with dynamic indexes (eg: arrays)
+- Unable to trace through "pairs", "ipairs" and "next"
 - sometimes will insert improperly
 
 ## Features
