@@ -12,7 +12,7 @@
 --? See the License for the specific language governing permissions and
 --? limitations under the License.
 
-local variable_pattern = "[%w_][%w_%d%[%]%.]*"
+local variable_pattern = "[%w_][%w_%d%[%]%.:]*"
 
 local debug_enabled = false
 
@@ -137,12 +137,14 @@ local supported_metamethods = {
 
 local parsed_data = {
 	strings = {},
+	comments = {},
 	variable_graph = {},
+	function_references = {},
 	aliases = {}
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.6) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.7) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -303,6 +305,47 @@ function table.length(t)
 	return count -- returns number of elements
 end
 
+table.copy = {
+
+	iShallow = function(t, __ENV)
+		__ENV = __ENV or _ENV
+		return {__ENV.table.unpack(t)}
+	end,
+	shallow = function(t, __ENV)
+		__ENV = __ENV or _ENV
+
+		local t_type = __ENV.type(t)
+
+		local t_shallow
+
+		if t_type == "table" then
+			for key, value in __ENV.next, t, nil do
+				t_shallow[key] = value
+			end
+		end
+
+		return t_shallow or t
+	end,
+	deep = function(t, __ENV)
+
+		__ENV = __ENV or _ENV
+
+		local function deepCopy(T)
+			local copy = {}
+			if __ENV.type(T) == "table" then
+				for key, value in __ENV.next, T, nil do
+					copy[deepCopy(key)] = deepCopy(value)
+				end
+			else
+				copy = T
+			end
+			return copy
+		end
+	
+		return deepCopy(t)
+	end
+}
+
 --- Returns a string in a format that looks like how the table would be written.
 ---@param t table the table you want to turn into a string
 ---@return string str the table but in string form.
@@ -432,6 +475,96 @@ function string.countCharInstances(str, char)
 	return count, true
 end
 
+local function isComment(start)
+	for i = 1, #parsed_data.comments do
+		local s = parsed_data.comments[i]
+
+		-- if the last index of this comment is greater or equal than the given index
+		if s.location.last >= start then
+			-- if the first index of this comment is less or equal than the given index
+			if s.location.start <= start then
+				-- then this comment contains the given index, so its a comment
+				return true
+			else
+				-- this means that we've passed over where the comment could be, so we know we will never get a match past this, so return false early
+				return false
+			end
+		end
+	end
+
+	-- its not in a comment, return false
+	return false
+end
+
+local function getAllComments(text)
+	--[[
+		get all line comments
+
+		line comments are pretty simple, everything after the line comment is now a comment
+		up until the next line.
+	]]
+	local pos = 0
+
+	for _ in text:gmatch("%-%-[%[]?[^%[]") do
+		pos, _ = text:find("%-%-[%[]?[^%[]", pos)
+
+		if not pos then break end
+
+		local comment_last, _ = text:find("\n", pos)
+
+		table.insert(parsed_data.comments, {
+			location = {
+				start = pos,
+				last = comment_last
+			},
+			string = text:sub(pos, comment_last),
+			type = "line_comment"
+		})
+
+		pos = comment_last
+	end
+
+	--[[
+		get all block comments
+
+		block comments are a little more complex, the block has to start outside of any comment
+		otherwise its ignored
+	]]
+	pos = 0
+
+	for _ in text:gmatch("%-%-%[%[") do
+		pos, _ = text:find("%-%-%[%[", pos)
+
+		if not pos then break end
+
+		local comment_last, _ = text:find("]]", pos)
+
+		if not comment_last then
+			comment_last = text:len()
+		end
+
+		if not isComment(pos) then
+			table.insert(parsed_data.comments, {
+				location = {
+					start = pos,
+					last = comment_last
+				},
+				string = text:sub(pos, comment_last),
+				type = "block_comment"
+			})
+		end
+
+		pos = comment_last
+	end
+
+	-- sort the comments by first occuring
+	table.sort(parsed_data.comments, 
+		function(a, b)
+			return a.location.start < b.location.start
+		end
+	)
+end
+
 local function getAllStrings(text)
 	-- get all of the double quote "" strings
 
@@ -444,22 +577,24 @@ local function getAllStrings(text)
 	for s in text:gmatch("\"") do
 		pos, _ = text:find("\"", pos + 1)
 
-		-- check to make sure this quote is not cancelled out
-		if text:sub(pos - 1, pos - 1) ~= "\\" then
-			if in_string then
-				table.insert(parsed_data.strings, {
-					location = {
-						start = string_start,
-						last = pos
-					},
-					string = text:sub(string_start, pos),
-					type = "double_quotes"
-				})
-			elseif not in_string then -- this is the start of a string
-				string_start = pos
-			end
+		if not isComment(pos) then
+			-- check to make sure this quote is not cancelled out
+			if text:sub(pos - 1, pos - 1) ~= "\\" then
+				if in_string then
+					table.insert(parsed_data.strings, {
+						location = {
+							start = string_start,
+							last = pos
+						},
+						string = text:sub(string_start, pos),
+						type = "double_quotes"
+					})
+				elseif not in_string then -- this is the start of a string
+					string_start = pos
+				end
 
-			in_string = not in_string
+				in_string = not in_string
+			end
 		end
 	end
 
@@ -474,22 +609,25 @@ local function getAllStrings(text)
 	for s in text:gmatch("'") do
 		pos, _ = text:find("'", pos + 1)
 
-		-- check to make sure this quote is not cancelled out
-		if text:sub(pos - 1, pos - 1) ~= "\\" then
-			if in_string then
-				table.insert(parsed_data.strings, {
-					location = {
-						start = string_start,
-						last = pos
-					},
-					string = text:sub(string_start, pos),
-					type = "single_quotes"
-				})
-			elseif not in_string then -- this is the start of a string
-				string_start = pos
-			end
+		if not isComment(pos) then
 
-			in_string = not in_string
+			-- check to make sure this quote is not cancelled out
+			if text:sub(pos - 1, pos - 1) ~= "\\" then
+				if in_string then
+					table.insert(parsed_data.strings, {
+						location = {
+							start = string_start,
+							last = pos
+						},
+						string = text:sub(string_start, pos),
+						type = "single_quotes"
+					})
+				elseif not in_string then -- this is the start of a string
+					string_start = pos
+				end
+
+				in_string = not in_string
+			end
 		end
 	end
 
@@ -600,8 +738,6 @@ local function getVariableGraph(text)
 		0
 	}
 
-	local function_references = {}
-
 	local previous_uncommented_end = 0
 	local previous_end = 0
 
@@ -634,10 +770,10 @@ local function getVariableGraph(text)
 
 		--print("lua word: "..lua_word)
 		-- filter out table indicies
-		local prev_char = text:sub(word_start-1, word_start-1)
+		--[[local prev_char = text:sub(word_start-1, word_start-1)
 		if prev_char == "." or prev_char == ":" then
 			goto getVariableGraph_nextWord
-		end
+		end]]
 
 		-- check if it was set to a function via =
 		--[[if lua_word ~= "function" and text:find(lua_word.."[ \n]*=[ \n]*function", word_start) then
@@ -646,16 +782,16 @@ local function getVariableGraph(text)
 		end]]
 
 		-- remove anything after a period or colon
-		local new_lua_word = lua_word:gsub("([^:%.])([:%.].*)", "%1")
+		--[[local new_lua_word = lua_word:gsub("([^:%.])([:%.].*)", "%1")
 
 		-- adjust the last char from the modified string
 		if new_lua_word ~= lua_word then
 			word_last = word_last - (lua_word:len() - new_lua_word:len())
 		end
 
-		lua_word = new_lua_word
+		lua_word = new_lua_word]]
 
-		dbg_previous_end = previous_end
+		--dbg_previous_end = previous_end
 
 		--print("modified lua word: "..lua_word)
 
@@ -666,6 +802,7 @@ local function getVariableGraph(text)
 		-- filter out strings
 		-- TODO: (also may want to trace strings if they match our variable name, they may be used to index the metatable)
 		if isString(word_start, text) then
+			print("skipping "..lua_word.." as its a string.")
 			goto getVariableGraph_nextWord
 		end
 
@@ -678,7 +815,7 @@ local function getVariableGraph(text)
 
 		local prev_scope = scopeToString(scope.tree)
 
-		if lua_word == "function" or lua_word == "if" or lua_word == "do" then
+		if lua_word == "if" or lua_word == "do" then
 			scope_depth = scope_depth + 1
 			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
 			scope.tree[scope_depth] = scope_counts[scope_depth]
@@ -697,7 +834,11 @@ local function getVariableGraph(text)
 		end
 
 		if lua_word == "function" then
-			table.insert(function_references, {
+			scope_depth = scope_depth + 1
+			scope_counts[scope_depth] = scope_counts[scope_depth] and scope_counts[scope_depth] + 1 or 1
+			scope.tree[scope_depth] = scope_counts[scope_depth]
+
+			table.insert(parsed_data.function_references, {
 				scope = scopeToString(scope.tree),
 				defined_in_scope = prev_scope,
 				location = {
@@ -713,8 +854,10 @@ local function getVariableGraph(text)
 
 		-- dont add for function definitions
 		if line_string:match("function ?"..lua_word) then
-			print("function defininition found, skipping")
-			goto getVariableGraph_nextWord
+			print("function defininition " ..lua_word.." found, skipping")
+
+			local x = 0
+			--goto getVariableGraph_nextWord
 		end
 
 		if not parsed_data.variable_graph[lua_word] then
@@ -737,8 +880,11 @@ local function getVariableGraph(text)
 			},
 			line_string = line_string,
 			word_string = lua_word,
-			scope = scope_string
+			scope = scope_string,
+			prev_function = #parsed_data.function_references
 		}
+
+
 
 		if lua_word:sub(lua_word:len(), lua_word:len()) == "[" then
 			node_data.word_string = node_data.word_string:sub(1, lua_word:len() - 1)
@@ -746,7 +892,29 @@ local function getVariableGraph(text)
 			lua_word = node_data.word_string
 		end
 
-		table.insert(parsed_data.variable_graph[lua_word], node_data)
+		--[[ 
+			insert into all indicies
+			for example, if the lua word is g_savedata.foo.bar
+			we want to insert this data in g_savedata, g_savedata.foo, and g_savedata.foo.bar
+			this is for performance, so we can just index this table directly later, rather than do iterations through it.
+		]]
+
+		local built_lua_word = ""
+		for word in lua_word:gmatch("[:%.]?[%w_][%w_%d%[%]]*") do
+			built_lua_word = built_lua_word..word
+			parsed_data.variable_graph[built_lua_word] = parsed_data.variable_graph[built_lua_word] or {}
+
+			local cloned_node_data = table.copy.deep(node_data)
+
+			cloned_node_data.word_string = built_lua_word
+			cloned_node_data.location.last = cloned_node_data.location.start + built_lua_word:len()
+
+			if built_lua_word:match("player") then
+				local x = 0
+			end
+
+			table.insert(parsed_data.variable_graph[built_lua_word], cloned_node_data)
+		end
 
 		::getVariableGraph_nextWord::
 
@@ -887,7 +1055,7 @@ local function getParams(funct_open, funct_close, text)
 		local param_str = param_string:sub(param_start, param_end)
 
 		-- make sure this isnt just a comment
-		if param_str:match("%-%-") then
+		if param_str:match("^%-%-") then
 			goto getParams_continue_param
 		end
 
@@ -1006,16 +1174,6 @@ end
 
 local function getVariableScopeGraph(variable_name, text, avoids)
 
-	local function scopeToString(scope)
-		local s = tostring(scope[1])
-
-		for depth = 2, #scope do
-			s = ("%s.%s"):format(s, scope[depth])
-		end
-
-		return s
-	end
-
 	local function canIter(variable, category)
 		if not avoids then
 			return true
@@ -1049,8 +1207,6 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		0
 	}
 
-	local function_references = {}
-
 	local defined_graph = {}
 
 	local forced_locals = {}
@@ -1067,7 +1223,7 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 		local word_start = node_data.location.start
 		local word_last = node_data.location.last
-		
+
 		if not word_start then
 			error("word_start is nil! "..text:sub(previous_end, text:len()))
 		end
@@ -1085,20 +1241,20 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		local prev_char = text:sub(word_start-1, word_start-1)
 
 		-- remove anything after a period or colon
-		local new_lua_word = variable_name:gsub("([^:%.])([:%.].*)", "%1")
+		--[[local new_lua_word = variable_name:gsub("([^:%.])([:%.].*)", "%1")
 
 		-- adjust the last char from the modified string
 		if new_lua_word ~= variable_name then
 			word_last = word_last - (variable_name:len() - new_lua_word:len())
-		end
+		end]]
 
-		variable_name = new_lua_word
+		--variable_name = new_lua_word
 
-		dbg_previous_end = previous_end
+		--dbg_previous_end = previous_end
 
 		--print("modified lua word: "..lua_word)
 
-		local scope_string = scopeToString(scope.tree)
+		local scope_string = node_data.scope
 
 		--[[local node_data = {
 			location = {
@@ -1148,7 +1304,9 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 		end
 
 		-- check if this a function param
-		local prev_function = function_references[#function_references]
+		local prev_function = parsed_data.function_references[node_data.prev_function]
+
+		--prev_function = nil
 
 		local forced_local = false
 
@@ -1192,7 +1350,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 			end
 		end
 
-		if is_var_defined then
+		if is_var_defined or true then
+
 			local equals_start, _, equals_str = node_data.line_string:find("( *= *).*"..variable_name:toLiteral())
 
 			if equals_start then
@@ -1213,10 +1372,15 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 				local set_to = getParams(equals_last + 1, node_data.line_string:len(), node_data.line_string)
 				local set_as = getParams(search_start, equals_start - 1, node_data.line_string)
 
+				if node_data.word_string == "g_savedata.TEA.API.TEAPlayers.player_data[player_index]" then
+					local x = 1
+				end
+
 				for set_to_index = 1, #set_to do
 					--if set_to[set_to_index].name:gsub("("..variable_name..")(%(.*%))", "%1") == variable_name then
 					--TODO: support no spaces in equations
-					if set_to[set_to_index].name:match(""..variable_name:toLiteral().."") then
+
+					if set_to[set_to_index].name == node_data.word_string then
 
 						if not set_as[set_to_index] then
 							print("Theres a param to set this value to, but nothing to set it as! "..set_to[set_to_index].name)
@@ -1245,17 +1409,23 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 							}
 						}
 
-						local filtered_scope_graph = filterVariableScopeGraph(alias_scope_graphs, adjusted_alias_variable)
+						--local filtered_scope_graph = filterVariableScopeGraph(alias_scope_graphs, adjusted_alias_variable)
 						
-						local alias_scope_graph = mergeVariableScopeGraphReferences(filtered_scope_graph)
+						for alias_scope_graph_id = 1, #alias_scope_graphs do
+							local alias_scope_graph = mergeVariableScopeGraphReferences(alias_scope_graphs[alias_scope_graph_id])
 
-						if not alias_scope_graph then
-							print("Failed to get alias scope graph?")
-						else
-							for alias_scope_graph_index = 1, #alias_scope_graph do
+							if not alias_scope_graph then
+								print("Failed to get alias scope graph?")
+							else
+								for alias_scope_graph_index = 1, #alias_scope_graph do
 
-								scope.graph[graph_id].references = scope.graph[graph_id].references or {}
-								table.insert(scope.graph[graph_id].references, alias_scope_graph[alias_scope_graph_index])
+									if graph_id == 0 then
+										graph_id = 1
+									end
+
+									scope.graph[graph_id].references = scope.graph[graph_id].references or {}
+									table.insert(scope.graph[graph_id].references, alias_scope_graph[alias_scope_graph_index])
+								end
 							end
 						end
 					end
@@ -1330,8 +1500,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 				-- find the function linked to this return
 				local function_reference = nil
-				for reference_depth = #function_references, 1, -1 do
-					local reference = function_references[reference_depth]
+				for reference_depth = #parsed_data.function_references, 1, -1 do
+					local reference = parsed_data.function_references[reference_depth]
 					if scope_string:match(reference.scope) then
 						function_reference = reference
 						break
@@ -1340,7 +1510,7 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 				
 				if not function_reference then
-					print("failed to find function reference?")
+					error("failed to find function reference?")
 				else
 					local function_name_start, function_name_last = text:find(variable_pattern, function_reference.location.last+1)
 					local function_name = text:sub(function_name_start, function_name_last)
@@ -1364,7 +1534,7 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 						local function_scope_graphs = getVariableScopeGraph(function_name, text, avoids)
 
-						-- filter out referencea to this function
+						-- filter out references to this function
 						for graph_index = #function_scope_graphs, 1, -1 do
 							local graph = function_scope_graphs[graph_index]
 
@@ -1377,6 +1547,8 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 						for graph_index = 1, #function_scope_graphs do
 							function_scope_graphs[graph_index] = mergeVariableScopeGraphReferences(function_scope_graphs[graph_index])
 						end
+
+						local x = 0
 
 						-- go through all of these graphes, in search for more metamethod references.
 						for graph_index = 1, #function_scope_graphs do
@@ -1962,7 +2134,6 @@ local function findVariableDefinition(variable, text)
 			definition.location.last = findClosure(name_last+1, text)
 			definition.name = text:sub(definition.location.start, definition.location.last)
 		else
-			print("woo hoo!!")
 			local _, var_end = text:find("[^"..variable_pattern.."]", name_last+1)
 			definition = findVariableDefinition({
 				name = text:sub(name_last+1, var_end),
@@ -2068,6 +2239,16 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 	for variable_instance_id = 1, #variable_instances do
 		local instance = variable_instances[variable_instance_id]
 
+		-- trim down word_string just before any . or :
+		--[[if instance.word_string:match("[%.:]") then
+			local char_pos, _ = instance.word_string:find("[%.:]")
+			
+			instance.word_string = instance.word_string:sub(1, char_pos - 1)
+
+			instance.location.last = instance.location.start + instance.word_string:len()
+		end]]
+			
+
 		--TODO: support multi-line equations.
 
 		--TODO: Follow Order of Operations, currently, it probably doesn't give a shit.
@@ -2159,10 +2340,18 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 						end
 
 						if char == "%[" then
-							print("brr")
 							last_index = findClosure(start_index, instance.line_string)
 						else
 							_, last_index = instance.line_string:find(variable_pattern, start_index)
+						end
+
+						-- ignore this if this is on the left side of an equals, as it will result in a syntax error
+						local equal_start, _ = instance.line_string:find("[^=<>~]=[^=<>]")
+						if equal_start then
+							-- check if we are on the left of the equals, if so, skip this one
+							if equal_start > start_table then
+								break
+							end
 						end
 
 						--start_table = start_table - 1
@@ -2228,6 +2417,8 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 									if closure then
 										-- get the params
 										local params = getParams(last_index + instance.line_location.start + 1, closure - 1, script_text)
+
+										--print(script_text:sub(last_index + instance.line_location.start + 1, closure - 1))
 
 										-- make sure we got the params
 										if params then
@@ -2327,6 +2518,8 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 		return
 	end
 
+	getAllComments(script_text)
+
 	getAllStrings(script_text)
 
 	variable_amount = script_text:countCharInstances(variable_pattern)
@@ -2388,11 +2581,13 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 			local scope_graphs = getVariableScopeGraph(param1.name, script_text)
 
-			local graph = filterVariableScopeGraph(scope_graphs, param1)
+			--local graph = filterVariableScopeGraph(scope_graphs, param1)
 
-			if graph then
-
-				findMetamethods(graph, metatable_definitions, setmetatable_data, script_text)
+			if scope_graphs then
+				for graph_id = 1, #scope_graphs do
+					local graph = scope_graphs[graph_id]
+					findMetamethods(graph, metatable_definitions, setmetatable_data, script_text)
+				end
 			else
 				print("Failed to find the graph?")
 			end
