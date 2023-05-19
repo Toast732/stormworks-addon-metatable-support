@@ -43,6 +43,7 @@ The main difference from real Metatables is that it will add a value to your tab
 - Struggles with arithmetic metatables on the same line
 - Unable to trace through "pairs", "ipairs" and "next"
 - sometimes will insert improperly
+- if you create a function like "TEAMatrix:newEmpty()", but then call it with "TEAMatrix.newEmpty()", it will not trace properly. And vice versa.
 
 ## Features
 
