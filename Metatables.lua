@@ -144,11 +144,12 @@ local parsed_data = {
 	comments = {},
 	variable_graph = {},
 	function_references = {},
+	function_definitions = {},
 	aliases = {}
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.9) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.10) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -280,11 +281,6 @@ print = function(str, force)
 		old_print(str)
 	end
 end
-
-local variable_amount = 0
-local amount_per_print = 0
-local last_print_count = 0
-local variable_amount_setup = 0
 
 --- @param x number the number to check if is whole
 --- @return boolean is_whole returns true if x is whole, false if not, nil if x is nil
@@ -571,7 +567,7 @@ local function getAllComments(text)
 		end
 	)
 
-	print(("Parsed all comments, took %0.3fs"):format(os.clock() - start_time), true)
+	print(("Parsed all %s comments, took %0.3fs"):format(#parsed_data.comments, os.clock() - start_time), true)
 end
 
 local function getAllStrings(text)
@@ -675,6 +671,12 @@ local function isString(start)
 	return false
 end
 
+local function findLine(pos, text)
+	local trimmed_text = text:sub(1, pos)
+
+	return string.countCharInstances(trimmed_text, "\n") + 1
+end
+
 local function findPreviousNewline(pos, text)
 	for char_index = pos, 1, -1 do
 		if text:sub(char_index, char_index):match("\n") then
@@ -721,6 +723,12 @@ local function findAliases(variable_name, script_text)
 end
 
 local function getVariableGraph(text)
+	
+	-- stat variables for printing progress
+	local last_print_count = 0
+	local variable_amount_setup = 0
+	local variable_amount = text:countCharInstances(variable_pattern)
+	local variable_amount_per_print = math.floor(variable_amount * 0.05)
 
 	local function scopeToString(scope)
 		local s = tostring(scope[1])
@@ -758,7 +766,7 @@ local function getVariableGraph(text)
 
 		variable_amount_setup = variable_amount_setup + 1
 
-		if variable_amount_setup - last_print_count >= amount_per_print then
+		if variable_amount_setup - last_print_count >= variable_amount_per_print then
 			local percentage = variable_amount_setup/variable_amount
 			local time_since_start = os.clock() - start_time
 			print(("%0.2f%% complete creating variable graph (%s/%s) about %0.2fs remaining"):format(percentage*100, variable_amount_setup, variable_amount, variable_amount/variable_amount_setup*time_since_start-time_since_start), true)
@@ -819,8 +827,6 @@ local function getVariableGraph(text)
 		--dbg_previous_end = previous_end
 
 		--print("modified lua word: "..lua_word)
-
-		
 
 		local prev_scope = scopeToString(scope.tree)
 
@@ -891,8 +897,6 @@ local function getVariableGraph(text)
 			prev_function = #parsed_data.function_references
 		}
 
-
-
 		if lua_word:sub(lua_word:len(), lua_word:len()) == "[" then
 			node_data.word_string = node_data.word_string:sub(1, lua_word:len() - 1)
 			node_data.location.last = node_data.location.last - 1
@@ -924,6 +928,114 @@ local function getVariableGraph(text)
 	end
 
 	print(("parsed variable graph, unique lua_words: %s. took %0.2fs"):format(lua_words, os.clock()-start_time), true)
+end
+
+
+local function_word_pattern = "[\n ]function[=%( ]"
+
+local function getFunctionDefinitions(text)
+
+	-- stat variables for printing progress
+	local last_print_count = 0
+	local function_amount = text:countCharInstances("[\n ]function ")
+	local function_amount_per_print = math.floor(function_amount * 0.05)
+	
+
+	print("getting all function definitions", true)
+	local start_time = os.clock()
+
+	local function_definitions = 0
+
+	local function_start = 0
+
+	local trimmed_text = text
+
+	-- go through all function definitions
+	for _ in text:gmatch(function_word_pattern) do
+
+		function_start, function_end = text:find(function_word_pattern, function_start + 1)
+
+		local variable_string
+		local variable_start
+		local variable_last
+		local g_translation
+		local function_definition_data
+
+		function_definitions = function_definitions + 1
+
+		-- make sure this function isn't a comment.
+		if isComment(function_start) then
+			print("Skipping function at line "..findLine(function_start, text).." as its a comment.")
+			goto next_function_definition
+		end
+
+		-- make sure this function isn't a string.
+		if isString(function_start) then
+			print("Skipping function at line "..findLine(function_start, text).." as its a string.")
+			goto next_function_definition
+		end
+
+		print("Setting up function at line "..findLine(function_start, text)..".")
+
+		if function_definitions - last_print_count >= function_amount_per_print then
+			local percentage = function_definitions/function_amount
+			local time_since_start = os.clock() - start_time
+			print(("%0.2f%% complete getting all function definitions (%s/%s) about %0.2fs remaining"):format(percentage*100, function_definitions, function_amount, function_amount/function_definitions*time_since_start-time_since_start), true)
+			last_print_count = function_definitions
+		end
+
+		--[[
+			if the last character is a (, then this is a definition thats more traditional to how you set a normal variable
+			eg: local veryCoolFunction = function() end
+			otherwise, its probably the other way to define functions
+			eg: local function veryCoolFunction() end
+		]]
+		if text:sub(function_end, function_end) == "(" then
+			-- its in a format such as "local veryCoolFunction = function() end"
+			variable_start, _, variable_string = trimmed_text:find("("..variable_pattern..")[ \n]*=[ \n]*function")
+			variable_last = variable_start + variable_string:len() - 1
+
+			--[[
+				as this is using the trimmed text variable
+				we need to trasnalte the character indexes to use the global indexes
+				as seen when using the normal text variable
+			]]
+			g_translation = text:len() - trimmed_text:len()
+			variable_start = variable_start + g_translation
+			variable_last = variable_last + g_translation
+		else
+			-- its in a format such as "local function veryCoolFunction() end"
+			_, variable_last, variable_string = text:find("function[\n ]("..variable_pattern..")", function_start)
+
+			variable_string = variable_string:gsub(".*[%.:]", "")
+
+			variable_start = variable_last - variable_string:len() + 1
+		end
+
+		print("Function name for function at line "..findLine(function_start, text).." found: "..variable_string)
+
+		function_definition_data = {
+			name = variable_string,
+			location = {
+				start = variable_start,
+				last = variable_last
+			},
+			first_param_is_self = text:sub(variable_start - 1, variable_start - 1) == ":"
+		}
+
+		parsed_data.function_definitions[variable_string] = parsed_data.function_definitions[variable_string] or {}
+
+		table.insert(parsed_data.function_definitions[variable_string], function_definition_data)
+
+		--print("Variable name from loc: \""..text:sub(function_definition_data.location.start, function_definition_data.location.last).."\"", true)
+
+		--print("definition for function \""..variable_string.."\" found on line "..findLine(function_start, text), true)
+
+		::next_function_definition::
+		trimmed_text = text:sub(function_start, text:len())
+	end
+
+	print(("parsed function defintions, function definitions: %s. took %0.2fs"):format(function_definitions, os.clock()-start_time), true)
 end
 
 local function findClosure(char_index, text)
@@ -1580,6 +1692,127 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 					end
 				end
 			end
+
+			-- Check for function calls with this as a param
+			local function_name_start, _, function_name = node_data.line_string:find("("..variable_pattern..")%([^%)]*"..node_data.word_string)
+
+			--[[
+				if this isn't in the () params, then check if the function is called with a : 
+				and if the variable left of the : is the variable we're tracking.
+			]]
+			if not function_name_start then
+				function_name_start, _, function_name = node_data.line_string:find("("..node_data.word_string..":[%w_][%w_%d%[%]]*)%(")
+
+				--[[if function_name_start then
+					function_name_start = function_name_start - 1
+				end]]
+				--[[if variable_name_start then
+					local variable_name_end = variable_name_start + node_data.word_string:len()
+
+					-- + 1, as + 0 will give you the :, and + 1 will give you the first char of the function's name.
+					function_name_start = variable_name_end + 1
+				end]]
+			end
+
+			local original_function_name_start = function_name_start
+
+			if function_name then
+				local prev_function_name_len = function_name:len()
+
+				function_name = function_name:gsub(".*[%.:]", "")
+				
+				function_name_start = function_name_start + (prev_function_name_len - function_name:len())
+			end
+
+			if function_name_start and parsed_data.function_definitions[function_name] then
+				local _, call_start = node_data.line_string:find(function_name.."%(")
+
+				local call_close = findClosure(call_start, node_data.line_string) - call_start -- why? this works everywhere else? why do I need to do this here?
+
+				--print(node_data.line_string:sub(call_start, call_start), true)
+				--print(node_data.line_string:sub(call_close, call_close), true)
+
+				--print("Function Name Start Char: "..node_data.line_string:sub(function_name_start, function_name_start).." Line: "..findLine(function_name_start, node_data.line_string), true)
+
+				-- get the params being sent.
+				local call_params = getParams(call_start + 1, call_close - 1, node_data.line_string)
+
+				--[[
+					if we call this function with a :, then the param before the function's name is going to be sent as the first param
+					modify call_params to account for this.
+				]]
+				if node_data.line_string:sub(function_name_start - 1, function_name_start - 1) == ":" then
+					table.insert(call_params, 1,{
+						location = {
+							start = function_name_start - 1,
+							last = function_name_start - 1
+						},
+						name = node_data.line_string:sub(original_function_name_start, function_name_start - 2):gsub(".*[%.:]", "")
+					})
+				end
+
+				--print("call char: "..node_data.line_string:sub(function_name_start - 1, function_name_start - 1))
+
+				local params_to_track = {}
+
+				-- find all of the params which match the name of the variable we're trying to track
+				for param_index = 1, #call_params do
+					local param_data = call_params[param_index]
+
+					if param_data.name == node_data.word_string then
+						params_to_track[param_index] = true
+					end
+				end
+
+				local function_definitions = parsed_data.function_definitions[function_name]
+
+				-- go through all functions with this name.
+				for function_definition_index = 1, #function_definitions do
+					local function_definition = function_definitions[function_definition_index]
+
+					-- get the opening bracket of the definition for the function
+					local definition_start = text:find("%(", function_definition.location.start)
+
+					-- get the closing bracket of the definition for the function
+					local definition_close = findClosure(definition_start, text)
+
+					-- get the params for the function
+					local definition_params = getParams(definition_start + 1, definition_close - 1, text)
+
+					-- if the function is declared with a :, then the first param will be self, so account for this in the params
+					if function_definition.first_param_is_self then
+						table.insert(definition_params, 1, {
+							location = {
+								start = definition_start,
+								last = definition_start
+							},
+							name = "self"
+						})
+					end
+
+					for param_index = 1, #definition_params do
+						if params_to_track[param_index] then
+
+							if canIter(definition_params[param_index], "function_params") then
+
+								avoids = avoids or {}
+
+								avoids.function_params = avoids.function_params or {}
+
+								table.insert(avoids.function_params, definition_params[param_index])
+
+								-- trace this variable
+								local param_scope_graphs = getVariableScopeGraph(definition_params[param_index].name, text, avoids)
+							
+								-- insert these into the graph
+								for graph_index = 1, #param_scope_graphs do
+									table.insert(scope.graph, param_scope_graphs[graph_index])
+								end
+							end
+						end
+					end
+				end
+			end
 		end
 
 		--print(lua_word..": "..scope.tree[scope_depth])
@@ -2175,11 +2408,11 @@ end
 
 local metamethods_to_write = {}
 
-local function findMetamethods(graph, metatable_definitions, setmetatable_data, script_text)
+local function findMetamethods(graph, script_text)
 
 
 	-- create a new graph, except theres no references, its all just in one table.
-	local variable_instances = graph.references
+	local variable_instances = graph.references or {}
 	local variable_definition = graph
 	variable_definition.references = nil
 	table.insert(variable_instances, 1, variable_definition)
@@ -2314,6 +2547,18 @@ local function findMetamethods(graph, metatable_definitions, setmetatable_data, 
 						local table_string = instance.line_string:sub(start_table, start_index - 1)
 
 						local index_string = instance.line_string:sub(start_index + 1, last_index)
+
+						--[[
+							trim the index string to just before any . [ or :, to avoid bringing unwanted indexing into this,
+							otherwise, we will get scenarios such as MT__index(prefab_list, "vehicles[vehicle_name]")
+							the expected result which this fixes is: MT__index(prefab_list, "vehicles")[vehicle_name]
+						]]
+						local index_index_start = index_string:find("[[%.:]")
+						if index_index_start then
+							index_string = index_string:sub(1, index_index_start - 1)
+							
+							last_index = start_index - 1 + index_index_start
+						end
 
 						-- modify index_string to have it send the name of the variable, not the value
 						if char == "%." or char == ":" then
@@ -2465,10 +2710,9 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	getAllStrings(script_text)
 
-	variable_amount = script_text:countCharInstances(variable_pattern)
-	amount_per_print = math.floor(variable_amount * 0.05)
-
 	getVariableGraph(script_text)
+
+	getFunctionDefinitions(script_text)
 
 	local setmetatable_definition = {
 		name = "setmetatable",
@@ -2478,13 +2722,39 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 		}
 	}
 
+	local get_variable_uses_start = os.clock()
 	local setmetatables = getAllVariableUses(setmetatable_definition, script_text)
+	
+	print(("Found and traced all uses of setmetatable, took %0.2fs"):format(os.clock() - get_variable_uses_start), true)
 
-	-- remove all non setmetatable calls
+	-- remove all invalid setmetatables
 	for setmetatable_index = #setmetatables, 1, -1 do
-		if setmetatables[setmetatable_index].use ~= "call" then
+
+		-- if this isn't a call
+		local setmetatable = setmetatables[setmetatable_index]
+		if setmetatable.use ~= "call" then
 			table.remove(setmetatables, setmetatable_index)
+
+			goto continue
 		end
+
+		-- if this isn't a setmetatable call
+		if setmetatable.name ~= "setmetatable" then
+			table.remove(setmetatables, setmetatable_index)
+
+			goto continue
+		end
+
+		-- if theres not a metatable to set the variable's metatable to.
+		if not setmetatable.params[2] then
+
+			error("Invalid setmetatable use found, metatable to set the variable's metatable was not supplied.\nAt Line "..findLine(setmetatable.location.start, script_text))
+
+			table.remove(setmetatables, setmetatable_index)
+			goto continue
+		end
+
+		::continue::
 	end
 
 	local metatable_definitions, setmetatables = findMetatableDefinitions(setmetatables, script_text)
@@ -2509,29 +2779,38 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 			local graph = filterVariableScopeGraph(scope_graph, variable_pattern_variable)
 
 			if graph then
-				findMetamethods(graph, metatable_definitions, {}, script_text)
+				findMetamethods(graph, script_text)
 			end
 		end
 	end
 
 	if metatable_usage_detection_mode == "smart" then
+		
+		local variables_to_check = {}
+
+		-- add all of the variables that are used in setmetatable, to the variables to check list.
 		for setmetatable_index = 1, #setmetatables do
+			table.insert(variables_to_check, setmetatables[setmetatable_index].params[1].name)
+		end
+
+		--[[ 
+			add self as a variable to check, as its too complex
+			as requires us to know exactly what metatable a variable is, which breaks the ability to have variables
+			with dynamic metatables (metatables that change, either with new metatmethods, or just completely change their metatable it is)
+		]]
+		--table.insert(variables_to_check, "self")
+
+		for _, variable_name in ipairs(variables_to_check) do
 			-- local metatabled_table_uses = getVariableGraph(setmetatables[setmetatable_index].params[1].name, script_text)
 
-			local setmetatable_data = setmetatables[setmetatable_index]
+			print(("finding possible metamethod calls for %s"):format(variable_name), true)
 
-			print("finding possible metamethod calls for "..setmetatable_data.params[1].name, true)
-
-			local param1 = setmetatable_data.params[1]
-
-			local scope_graphs = getVariableScopeGraph(param1.name, script_text)
-
-			--local graph = filterVariableScopeGraph(scope_graphs, param1)
+			local scope_graphs = getVariableScopeGraph(variable_name, script_text)
 
 			if scope_graphs then
 				for graph_id = 1, #scope_graphs do
 					local graph = scope_graphs[graph_id]
-					findMetamethods(graph, metatable_definitions, setmetatable_data, script_text)
+					findMetamethods(graph, script_text)
 				end
 			else
 				print("Failed to find the graph?")
