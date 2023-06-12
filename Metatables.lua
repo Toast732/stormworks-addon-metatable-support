@@ -20,6 +20,9 @@ local variable_pattern = "[%w_][%w_%d%[%]%.:]*"
 
 local debug_enabled = false
 
+-- if you want SWAMS to check for errors it may have made afterwards
+local error_checking = true
+
 local target_pattern_defs = {
 	artihmetic_two_variables = {
 		{
@@ -149,7 +152,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.10) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.11) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -671,10 +674,35 @@ local function isString(start)
 	return false
 end
 
+-- count the number of instances of a character, but ignore any comments or strings.
+function countNormalCharInstances(text, char)
+	local pos = 0
+
+	local count = 0
+
+	for _ in text:gmatch(char) do
+		pos, _ = text:find(char, pos + 1)
+		if not isComment(pos) and not isString(pos) then
+			count = count + 1
+		end
+	end
+
+	return count
+end
+
 local function findLine(pos, text)
 	local trimmed_text = text:sub(1, pos)
 
 	return string.countCharInstances(trimmed_text, "\n") + 1
+end
+
+local function getLineContent(line, text)
+
+	local cut_to_line = text:gsub("\n[^\n]*", "", line - 2)
+
+	local restricted_to_line = cut_to_line:sub(3, cut_to_line:find("\n", 3) - 1)
+
+	return restricted_to_line
 end
 
 local function findPreviousNewline(pos, text)
@@ -1038,7 +1066,7 @@ local function getFunctionDefinitions(text)
 	print(("parsed function defintions, function definitions: %s. took %0.2fs"):format(function_definitions, os.clock()-start_time), true)
 end
 
-local function findClosure(char_index, text)
+local function findClosure(char_index, text, requires_same_type)
 	local openings_dict = {
 		["("] = {
 			")"
@@ -1051,6 +1079,14 @@ local function findClosure(char_index, text)
 		}
 	}
 
+	local opener_is_comment
+	local opener_is_string
+
+	if requires_same_type then
+		opener_is_comment = isComment(char_index)
+		opener_is_string = isString(char_index)
+	end
+
 	local opening = text:sub(char_index, char_index)
 
 	local closures = openings_dict[opening]
@@ -1061,13 +1097,34 @@ local function findClosure(char_index, text)
 
 	local lowest_closure = text_length
 
+	local found_closure = false
+
 	for closure_index = 1, #closures do
 		local closure = closures[closure_index]
 
 		local relative_scope_depth = 1
 
-		for step_char_index = 1, text_length - (char_index + 1) do
+		for step_char_index = 1, text_length - char_index do
 			local char = text_crop:sub(step_char_index, step_char_index)
+
+			-- if we care about the character being the same type
+			if requires_same_type then
+				local global_char_pos = char_index + step_char_index
+
+				if char ~= text:sub(global_char_pos, global_char_pos) then
+					error("Character is different from the one in global space?")
+				end
+
+				if opener_is_comment ~= isComment(global_char_pos) then
+					goto next_char
+				end
+				if opener_is_string ~= isString(global_char_pos) then
+					goto next_char
+				end
+			end
+
+			--print("normal char: "..char, true)
+			--print("translated char: "..text:sub(, char_index + step_char_index))
 
 			if char == opening then
 				relative_scope_depth = relative_scope_depth + 1
@@ -1081,13 +1138,19 @@ local function findClosure(char_index, text)
 				lowest_closure = math.min(lowest_closure, step_char_index)
 				break
 			end
+
+			::next_char::
+		end
+
+		if relative_scope_depth <= 0 then
+			found_closure = true
 		end
 	end
 
-	return lowest_closure + char_index
+	return lowest_closure + char_index, found_closure
 end
 
-local function findOpener(char_index, text)
+local function findOpener(char_index, text, requires_same_type)
 	local closures_dict = {
 		[")"] = {
 			"("
@@ -1100,15 +1163,23 @@ local function findOpener(char_index, text)
 		}
 	}
 
+	local closure_is_comment
+	local closure_is_string
+
+	if requires_same_type then
+		closure_is_comment = isComment(char_index)
+		closure_is_string = isString(char_index)
+	end
+
 	local closing = text:sub(char_index, char_index)
 
 	local openers = closures_dict[closing]
 
-	local text_length = text:len()
-
 	local text_crop = text:sub(1, char_index - 1)
 
 	local highest_opener = 0
+
+	local found_opener = false
 
 	for opener_index = 1, #openers do
 		local opener = openers[opener_index]
@@ -1117,6 +1188,22 @@ local function findOpener(char_index, text)
 
 		for step_char_index = char_index - 1, 1, -1 do
 			local char = text_crop:sub(step_char_index, step_char_index)
+
+			-- if we care about the character being the same type
+			if requires_same_type then
+				local global_char_pos = step_char_index
+
+				if char ~= text:sub(global_char_pos, global_char_pos) then
+					error("Character is different from the one in global space? cropped space char: "..char.." global space char: "..text:sub(global_char_pos, global_char_pos).." global line content: "..getLineContent(findLine(global_char_pos, text), text))
+				end
+
+				if closure_is_comment ~= isComment(global_char_pos) then
+					goto next_char
+				end
+				if closure_is_string ~= isString(global_char_pos) then
+					goto next_char
+				end
+			end
 
 			if char == closing then
 				relative_scope_depth = relative_scope_depth + 1
@@ -1130,10 +1217,16 @@ local function findOpener(char_index, text)
 				highest_opener = math.min(highest_opener, step_char_index)
 				break
 			end
+
+			::next_char::
+		end
+
+		if relative_scope_depth <= 0 then
+			found_opener = true
 		end
 	end
 
-	return highest_opener
+	return highest_opener, found_opener
 end
 
 --- Ugly function that works, it returns a table of the parametres sent to the function.
@@ -2391,7 +2484,12 @@ local function insertString(string, start, last, text, disable_length_modifier)
 		length_modifier = 0
 	end
 
-	text = text:sub(1, start - 1 + length_modifier)..string..text:sub(last + 1 + length_modifier, before_length)
+	local replace_start = start - 1 + length_modifier
+	local replace_last = last + 1 + length_modifier
+
+	print("Replacing \""..text:sub(replace_start, replace_last).."\" With \""..string.."\"")
+
+	text = text:sub(1, replace_start)..string..text:sub(replace_last, before_length)
 
 	local length_change = text:len() - before_length
 	
@@ -2508,6 +2606,10 @@ local function findMetamethods(graph, script_text)
 								},
 								replace_str = replace_str
 							})
+
+							if debug_enabled then
+								metamethods_to_write[#metamethods_to_write].replacing = script_text:sub(equation_start, equation_last)
+							end
 						end
 					end
 				elseif metamethod_data.handling == "index" then
@@ -2594,6 +2696,10 @@ local function findMetamethods(graph, script_text)
 								},
 								replace_str = replace_str
 							})
+
+							if debug_enabled then
+								metamethods_to_write[#metamethods_to_write].replacing = script_text:sub(g_table_start, g_index_last)
+							end
 
 							-- if this is via :, then we should put the metatable as the first parametre
 							if char == ":" then
@@ -2889,8 +2995,15 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 		--local full_definition_start, full_definition_last = script_text:find(variable_pattern.."= *"..string.toLiteral(metatable_definition.name))
 
+		local translated_pos = translatePosition(metatable_definition.location.start, script_text)
 
-		script_text = insertString(metatable_definition_id, metatable_definition.location.start, metatable_definition.location.last, script_text)
+		local open_bracket = script_text:find("{", translated_pos + metatable_definition.location.start)
+
+		local close_bracket, _ = findClosure(open_bracket, script_text)
+
+		close_bracket = close_bracket - translated_pos
+
+		script_text = insertString(metatable_definition_id, metatable_definition.location.start, close_bracket, script_text)
 
 		-- insert the metatable definition
 
@@ -2898,6 +3011,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 		-- location is + character length of the metatable id to avoid overwriting the id set.
 		local metatable_defininition_insert_location = metatable_definition.location.last + tostring(metatable_definition_id):len()
+
 		script_text = insertString(metatable_definition_string, metatable_defininition_insert_location, metatable_defininition_insert_location, script_text)
 		-- handle local
 		--[[if script_text:sub(full_definition_start - 6, full_definition_start - 1) == "local " then
@@ -2917,6 +3031,206 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 	print("writing to "..script_path, true)
 	LifeBoatAPI.Tools.FileSystemUtils.writeAllText(LifeBoatAPI.Tools.Filepath:new(script_path, true), script_text)
+
+	if error_checking then
+
+		-- update the comments and strings parsed data, as the script has since been modified.
+		parsed_data.comments = {}
+		parsed_data.strings = {}
+		getAllComments(script_text)
+		getAllStrings(script_text)
+
+		local start_time = os.clock()
+		print("Checking for errors", true)
+
+		local open_circle_brackets = countNormalCharInstances(script_text, "%(")
+		local close_circle_brackets = countNormalCharInstances(script_text, "%)")
+
+		-- if theres more open circle brackets than closing circle brackets, then try to identify them.
+		if open_circle_brackets > close_circle_brackets then
+			-- check for missing ")"s
+
+			print("Theres "..open_circle_brackets - close_circle_brackets.." more open circle brackets than closing circle brackets, attempting to identify cause...", true)
+
+			local open_bracket_pos = 1
+			for _ in script_text:gmatch("%(") do
+				open_bracket_pos, _ = script_text:find("%(", open_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(open_bracket_pos) then
+					goto next_circle_bracket
+				end
+
+				-- check if its a string
+				if isString(open_bracket_pos) then
+					goto next_circle_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_closure = findClosure(open_bracket_pos, script_text, true)
+
+				if not found_closure then
+					error("Missing closure for ( on line "..findLine(open_bracket_pos, script_text))
+				end
+
+				::next_circle_bracket::
+			end
+		elseif open_circle_brackets < close_circle_brackets then
+			print("Theres "..close_circle_brackets - open_circle_brackets.." more closing circle brackets than opening circle brackets, attempting to identify cause...", true)
+		
+			local close_bracket_pos = 1
+			for _ in script_text:gmatch("%)") do
+				close_bracket_pos, _ = script_text:find("%)", close_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(close_bracket_pos) then
+					goto next_circle_bracket
+				end
+
+				-- check if its a string
+				if isString(close_bracket_pos) then
+					goto next_circle_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_opener = findOpener(close_bracket_pos, script_text, true)
+
+				if not found_opener then
+					error("Missing opener for ) on line "..findLine(close_bracket_pos, script_text))
+				end
+
+				::next_circle_bracket::
+			end
+		end
+
+		local open_squiggly_brackets = countNormalCharInstances(script_text, "{")
+		local close_squiggly_brackets = countNormalCharInstances(script_text, "}")
+
+		-- if theres more open squiggly brackets than closing squiggly brackets, then try to identify them.
+		if open_squiggly_brackets > close_squiggly_brackets then
+			-- check for missing "}"s
+
+			print("Theres "..open_squiggly_brackets - close_squiggly_brackets.." more open squiggly brackets than closing squiggly brackets, attempting to identify cause...", true)
+
+			local open_bracket_pos = 1
+			for _ in script_text:gmatch("{") do
+				open_bracket_pos, _ = script_text:find("{", open_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(open_bracket_pos) then
+					goto next_squiggly_bracket
+				end
+
+				-- check if its a string
+				if isString(open_bracket_pos) then
+					goto next_squiggly_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_closure = findClosure(open_bracket_pos, script_text, true)
+
+				if not found_closure then
+					error("Missing closure for { on line "..findLine(open_bracket_pos, script_text))
+				end
+
+				::next_squiggly_bracket::
+			end
+		elseif open_squiggly_brackets < close_squiggly_brackets then
+			print("Theres "..close_squiggly_brackets - open_squiggly_brackets.." more closing squiggly brackets than opening squiggly brackets, attempting to identify cause...", true)
+		
+			local close_bracket_pos = 1
+			for _ in script_text:gmatch("}") do
+				close_bracket_pos, _ = script_text:find("}", close_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(close_bracket_pos) then
+					goto next_squiggly_bracket
+				end
+
+				-- check if its a string
+				if isString(close_bracket_pos) then
+					goto next_squiggly_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_opener = findOpener(close_bracket_pos, script_text, true)
+
+				if not found_opener then
+					error("Missing opener for } on line "..findLine(close_bracket_pos, script_text))
+				end
+
+				::next_squiggly_bracket::
+			end
+		end
+
+		local open_square_brackets = countNormalCharInstances(script_text, "%[")
+		local close_square_brackets = countNormalCharInstances(script_text, "%]")
+
+		-- if theres more open square brackets than closing square brackets, then try to identify them.
+		if open_square_brackets > close_square_brackets then
+			-- check for missing "]"s
+
+			print("Theres "..open_square_brackets - close_square_brackets.." more open square brackets than closing square brackets, attempting to identify cause...", true)
+
+			local open_bracket_pos = 1
+			for _ in script_text:gmatch("%[") do
+				open_bracket_pos, _ = script_text:find("%[", open_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(open_bracket_pos) then
+					goto next_square_bracket
+				end
+
+				-- check if its a string
+				if isString(open_bracket_pos) then
+					goto next_square_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_closure = findClosure(open_bracket_pos, script_text, true)
+
+				if not found_closure then
+					error("Missing closure for [ on line "..findLine(open_bracket_pos, script_text))
+				end
+
+				::next_square_bracket::
+			end
+		elseif open_square_brackets < close_square_brackets then
+			print("Theres "..close_square_brackets - open_square_brackets.." more closing square brackets than opening square brackets, attempting to identify cause...", true)
+		
+			local close_bracket_pos = 1
+			for _ in script_text:gmatch("%]") do
+				close_bracket_pos, _ = script_text:find("%]", close_bracket_pos + 1)
+
+				-- check if its a comment
+				if isComment(close_bracket_pos) then
+					goto next_square_bracket
+				end
+
+				-- check if its a string
+				if isString(close_bracket_pos) then
+					goto next_square_bracket
+				end
+
+				--local bracket_line = findLine(open_bracket_pos, script_text)
+
+				local _, found_opener = findOpener(close_bracket_pos, script_text, true)
+
+				if not found_opener then
+					error("Missing opener for ] on line "..findLine(close_bracket_pos, script_text))
+				end
+
+				::next_square_bracket::
+			end
+		end
+
+		print(("No errors found! Took %0.2fs"):format(os.clock() - start_time), true)
+	end
 
 	print(("(SWAMS) completed setting up metatables! Took %ss"):format(os.clock() - start_time), true)
 
