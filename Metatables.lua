@@ -152,7 +152,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.12) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.13) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -2460,21 +2460,31 @@ local function findMetatableDefinitions(setmetatables, text)
 	return built_definitions, setmetatables
 end
 
+local metamethods_to_write = {}
+
 local string_location_translations = {}
-local string_location_translations_last = {}
 
 local function translatePosition(pos, pos_last)
 	local length_modifier = 0
+
+	local last_index = 0
 	
-	for start_index, amount in pairs(string_location_translations) do
+	for start_index, translation_data in pairs(string_location_translations) do
 		if start_index <= pos then
-			length_modifier = length_modifier + amount
+			length_modifier = length_modifier + translation_data.change
+			last_index = math.max(start_index, last_index)
+		end
+	end
+
+	if last_index ~= 0 then
+		if pos_last <= string_location_translations[last_index].last then
+			length_modifier = length_modifier - 1
 		end
 	end
 	
-	if string_location_translations_last[pos_last] then
+	--[[if string_location_translations_last[pos_last] then
 		length_modifier = length_modifier - 1
-	end
+	end]]
 
 	return length_modifier
 end
@@ -2500,18 +2510,18 @@ local function insertString(string, start, last, text, disable_length_modifier)
 	
 	if length_change ~= 0 then
 		if not string_location_translations[start] then
-			string_location_translations[start] = length_change
+			string_location_translations[start] = {
+				change = length_change,
+				last = last
+			}
 		else
-			string_location_translations[start] = string_location_translations[start] + length_change
+			string_location_translations[start].change = string_location_translations[start].change + length_change
+			string_location_translations[start].last = math.max(string_location_translations[start].last, last)
 		end
-
-		string_location_translations_last[last] = true
 	end
 
 	return text
 end
-
-local metamethods_to_write = {}
 
 local function findMetamethods(graph, script_text)
 
@@ -3002,7 +3012,7 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 
 		--local full_definition_start, full_definition_last = script_text:find(variable_pattern.."= *"..string.toLiteral(metatable_definition.name))
 
-		local translated_pos = translatePosition(metatable_definition.location.start, script_text)
+		local translated_pos = translatePosition(metatable_definition.location.start, metatable_definition.location.last)
 
 		local open_bracket = script_text:find("{", translated_pos + metatable_definition.location.start)
 
