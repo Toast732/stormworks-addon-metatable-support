@@ -77,15 +77,6 @@ local target_pattern_defs = {
 
 local supported_metamethods = {
 	{
-		name = "__unm",
-		replace_pattern = "MT__unm(%s)",
-		target_patterns = target_pattern_defs.artihmetic_one_variable,
-		chars = {
-			"-"
-		},
-		handling = "arithmetic"
-	},
-	{
 		name = "__add",
 		replace_pattern = "MT__add(%s, %s)",
 		target_patterns = target_pattern_defs.artihmetic_two_variables,
@@ -139,6 +130,15 @@ local supported_metamethods = {
 			":"
 		},
 		handling = "index"
+	},
+	{
+		name = "__unm",
+		replace_pattern = "MT__unm(%s)",
+		target_patterns = target_pattern_defs.artihmetic_one_variable,
+		chars = {
+			"-"
+		},
+		handling = "arithmetic"
 	}
 }
 
@@ -152,7 +152,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.11) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.12) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -543,7 +543,7 @@ local function getAllComments(text)
 
 		if not pos then break end
 
-		local comment_last, _ = text:find("]]", pos)
+		local _, comment_last = text:find("]]", pos)
 
 		if not comment_last then
 			comment_last = text:len()
@@ -2461,14 +2461,19 @@ local function findMetatableDefinitions(setmetatables, text)
 end
 
 local string_location_translations = {}
+local string_location_translations_last = {}
 
-local function translatePosition(pos, text)
+local function translatePosition(pos, pos_last)
 	local length_modifier = 0
 	
 	for start_index, amount in pairs(string_location_translations) do
 		if start_index <= pos then
 			length_modifier = length_modifier + amount
 		end
+	end
+	
+	if string_location_translations_last[pos_last] then
+		length_modifier = length_modifier - 1
 	end
 
 	return length_modifier
@@ -2478,7 +2483,7 @@ end
 local function insertString(string, start, last, text, disable_length_modifier)
 	local before_length = text:len()
 
-	local length_modifier = translatePosition(start, text)
+	local length_modifier = translatePosition(start, last)
 
 	if disable_length_modifier then
 		length_modifier = 0
@@ -2499,6 +2504,8 @@ local function insertString(string, start, last, text, disable_length_modifier)
 		else
 			string_location_translations[start] = string_location_translations[start] + length_change
 		end
+
+		string_location_translations_last[last] = true
 	end
 
 	return text
