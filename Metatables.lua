@@ -16,7 +16,18 @@ limitations under the License.
 
 ]]
 
+local checked_aliases = {}
+local metamethods_to_write = {}
+local string_location_translations = {}
+
+-- warnings to tell the user about when its finished running.
+local warnings = {}
+
+traced_variables = {} -- for debug purposes, contains all of the variables that have been iterated in getVariableScopeGraph
+variables_requested_to_trace = {} -- for debug purposes, contains all of the variables that have been requested in getVariableScopeGraph
+
 local variable_pattern = "[%w_][%w_%d%[%]%.:]*"
+local function_word_pattern = "[\n ]function[=%( ]"
 
 local debug_enabled = false
 
@@ -152,7 +163,7 @@ local parsed_data = {
 }
 
 local SWAMS_code = [[
--- Stormworks Addon Metatable Support (0.0.1.13) (SWAMS), by Toastery
+-- Stormworks Addon Metatable Support (0.0.1.14) (SWAMS), by Toastery
 
 function MT__lua_error(error) -- TODO: print line number, also try to figure out a way to get this to work with vehicle lua.
 	server.announce(server.getAddonData(server.getAddonIndex()).path_id, error, -1)
@@ -283,6 +294,15 @@ print = function(str, force)
 	if debug_enabled or force then
 		old_print(str)
 	end
+end
+
+local function warn(str)
+
+	str = "WARN: "..tostring(str)
+
+	table.insert(warnings, str)
+
+	print(tostring(str), true)
 end
 
 --- @param x number the number to check if is whole
@@ -715,8 +735,6 @@ local function findPreviousNewline(pos, text)
 	return 1
 end
 
-local checked_aliases = {}
-
 local function findAliases(variable_name, script_text)
 	local aliases = {
 		variable_name
@@ -957,9 +975,6 @@ local function getVariableGraph(text)
 
 	print(("parsed variable graph, unique lua_words: %s. took %0.2fs"):format(lua_words, os.clock()-start_time), true)
 end
-
-
-local function_word_pattern = "[\n ]function[=%( ]"
 
 local function getFunctionDefinitions(text)
 
@@ -1389,6 +1404,12 @@ end
 
 local function getVariableScopeGraph(variable_name, text, avoids)
 
+	--[[if variable_name:match("\t") then
+		error("why does this variable name contain \t?")
+	end]]
+
+	variables_requested_to_trace[variable_name] = true
+
 	local function canIter(variable, category)
 		if not avoids then
 			return true
@@ -1436,6 +1457,10 @@ local function getVariableScopeGraph(variable_name, text, avoids)
 
 	-- go through all "lua words"
 	for _, node_data in ipairs(parsed_data.variable_graph[variable_name]) do
+
+		traced_variables[variable_name] = traced_variables[variable_name] or {}
+
+		table.insert(traced_variables[variable_name], node_data)
 
 		local word_start = node_data.location.start
 		local word_last = node_data.location.last
@@ -2460,10 +2485,6 @@ local function findMetatableDefinitions(setmetatables, text)
 	return built_definitions, setmetatables
 end
 
-local metamethods_to_write = {}
-
-local string_location_translations = {}
-
 local function translatePosition(pos, pos_last)
 	local length_modifier = 0
 
@@ -2621,12 +2642,14 @@ local function findMetamethods(graph, script_text)
 									start = equation_start,
 									last = equation_last
 								},
-								replace_str = replace_str
+								replace_str = replace_str,
+								replacing = script_text:sub(equation_start, equation_last),
+								nudge_start = metamethod_data.name:len() + 3 -- the actual start of the variable, + 2 for MT, + 1 for (, + len for the metamethod (eg: __index)
 							})
 
-							if debug_enabled then
+							--[[if debug_enabled then
 								metamethods_to_write[#metamethods_to_write].replacing = script_text:sub(equation_start, equation_last)
-							end
+							end]]
 						end
 					end
 				elseif metamethod_data.handling == "index" then
@@ -2711,12 +2734,14 @@ local function findMetamethods(graph, script_text)
 									start = g_table_start,
 									last = g_index_last
 								},
-								replace_str = replace_str
+								replace_str = replace_str,
+								replacing = script_text:sub(g_table_start, g_index_last),
+								nudge_start = metamethod_data.name:len() + 3 -- the actual start of the variable, + 2 for MT, + 1 for (, + len for the metamethod (eg: __index)
 							})
 
-							if debug_enabled then
+							--[[if debug_enabled then
 								metamethods_to_write[#metamethods_to_write].replacing = script_text:sub(g_table_start, g_index_last)
-							end
+							end]]
 
 							-- if this is via :, then we should put the metatable as the first parametre
 							if char == ":" then
@@ -2803,6 +2828,63 @@ local function findMetamethods(graph, script_text)
 				end
 			end
 		end]]
+	end
+end
+
+-- merges the metamethods_to_write which write ontop of eachother into one, to avoid issues when it comes to adding them to the script.
+local function mergeMetamethodsToWrite(script_text)
+
+	local metamethods_to_remove = {}
+
+	-- go through all strings we want to insert in metamethods_to_write
+	for metamethod_to_write_index = 1, #metamethods_to_write do
+		local metamethod = metamethods_to_write[metamethod_to_write_index]
+
+		-- go through all of them again, skipping the one we're currently going through, to check if they conflict
+		for metamethod_to_merge_index = 1, #metamethods_to_write do
+			if metamethod_to_merge_index == metamethod_to_write_index then
+				goto continue
+			end
+
+			local merging_metamethod = metamethods_to_write[metamethod_to_merge_index]
+
+			-- check if it does not conflict
+			if metamethod.location.last < merging_metamethod.location.start or
+			metamethod.location.start > merging_metamethod.location.last then
+				goto continue
+			end
+
+			--* <it conflicts>
+			print(("Merging metamethod %s into %s on line %s as they conflict"):format(merging_metamethod.replace_str, metamethod.replace_str, findLine(metamethod.location.start, script_text)))
+
+
+			--[[
+				merge the conflicting one into this one.
+			]]
+
+			-- get the location we need to merge to
+			local replace_start, replace_last = metamethod.replace_str:find(merging_metamethod.replacing)
+
+			-- if we did not get the location, skip, and print debug
+			if not replace_start or not replace_last then
+				warn(("%s contains %s, however, attempting to find it failed (on line %s)"):format(metamethod.replace_str, merging_metamethod.replacing, findLine(metamethod.location.start, script_text)))
+				goto continue
+			end
+
+			-- replace it
+			metamethod.replace_str = metamethod.replace_str:sub(1, math.max(replace_start - 1, 1))..merging_metamethod.replace_str..metamethod.replace_str:sub(math.min(replace_last + 1, metamethod.replace_str:len()), metamethod.replace_str:len())
+
+			-- say that we should remove this merged metamethod at the end.
+			table.insert(metamethods_to_remove, metamethod_to_merge_index)
+			::continue::
+		end
+	end
+
+	-- remove all the metamethods in metamethods_to_remove
+	table.sort(metamethods_to_remove, function(a, b) return a > b end)
+
+	for metamethod_to_remove_index = 1, #metamethods_to_remove do
+		table.remove(metamethods_to_write, metamethods_to_remove[metamethod_to_remove_index])
 	end
 end
 
@@ -2940,6 +3022,8 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 			end
 		end
 	end
+
+	mergeMetamethodsToWrite(script_text)
 
 	print(("found %s possible metamethod calls, took %0.2fs"):format(#metamethods_to_write, os.clock() - find_possible_metamethod_calls_start), true)
 
@@ -3249,7 +3333,14 @@ function setupMetatables(script_text, script_path, metatable_usage_detection_mod
 		print(("No errors found! Took %0.2fs"):format(os.clock() - start_time), true)
 	end
 
-	print(("(SWAMS) completed setting up metatables! Took %ss"):format(os.clock() - start_time), true)
+	print(("(SWAMS) completed setting up metatables with %s warnings! Took %ss"):format(#warnings, os.clock() - start_time), true)
+
+	if #warnings > 0 then
+		print("Warnings:")
+		for warning_index = 1, #warnings do
+			print(warnings[warning_index], true)
+		end
+	end
 
 	return script_text
 end
